@@ -246,8 +246,10 @@ similar / unmatched            → review (similar=Phase4, unmatched=Phase1 matc
 
 ### Phase 3 — Import · 서버 exact · OCR/GPT
 
-**상태**: 3a 접수 API·dry-run upload ✅ — [phase3-import.md](./phase3-import.md)  
-**후속 3b**: 관리자 승인 → OCR/GPT enqueue · contentIdx 연결
+**상태**:  
+- 3a 접수·안전 ✅ — `Phase 3a automated tests passed / staging manual verification pending`  
+- 3b 승인→OCR 최소 ✅ — [phase3-import.md](./phase3-import.md)  
+**미포함**: similar, watcher, 자동 승인, 카카오 자동 수집
 
 **인증 (선결정)**  
 - 초기: `auto_register=off`, 관리자 검수 후 Import  

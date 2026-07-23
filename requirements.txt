@@ -1,0 +1,3 @@
+# [변경사유]: pip install -r 용 고정 의존성 (pyproject.toml 과 동기)
+click>=8.1
+python-dotenv>=1.0

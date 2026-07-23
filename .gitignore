@@ -1,0 +1,32 @@
+# [변경사유]: 로컬 collector — 시크릿·원본·venv·SQLite 제외
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+.env
+.env.*
+!.env.example
+
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 입력·작업 산출물 (원본 경로만 설정으로 가리킴)
+input/
+data/
+output/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!docs/

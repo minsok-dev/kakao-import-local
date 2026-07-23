@@ -1,0 +1,41 @@
+# [변경사유]: kakao-import-local Phase 0~1 — 로컬 collector 패키지 정의
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kakao-import-local"
+version = "0.1.0"
+description = "카카오톡 로컬 수집·매칭 도구 (서버 Import API 이전 Phase 0~1)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "kdance" }]
+dependencies = [
+  "click>=8.1",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+# Phase 4 유사 매칭 시 backend 공용 패키지 연동용 (선택)
+# signature = [
+#   "danceinfo-image-signature @ file:../backend/packages/danceinfo_image_signature",
+# ]
+
+[project.scripts]
+kakao-import = "kakao_import.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

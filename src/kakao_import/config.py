@@ -1,4 +1,4 @@
-# [변경사유]: Phase1 설정 — 매칭 tolerance·그룹 텍스트 경계 기본값
+# [변경사유]: Phase1 설정 + Phase2 MERGE_MODE
 """런타임 설정."""
 
 from __future__ import annotations
@@ -6,10 +6,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+MergeMode = Literal["safe", "balanced", "auto"]
 
 
 @dataclass(frozen=True)
@@ -19,13 +22,11 @@ class Settings:
     export_root: Path | None
     db_path: Path
     log_level: str
-    # 분 단위 불일치 시 유일 후보 허용 초
     match_tolerance_seconds: int
-    # 사진 그룹 후 설명 최대 간격(분)
     group_text_max_gap_minutes: int
-    # 다른 발신자 짧은 응답 허용 초 (초과·긴 문장이면 그룹 종료)
     different_sender_grace_seconds: int
     different_sender_max_chars: int
+    merge_mode: MergeMode
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -39,6 +40,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
     db_path = Path(db_raw).expanduser()
     if not db_path.is_absolute():
         db_path = (PROJECT_ROOT / db_path).resolve()
+    mode_raw = (os.getenv("MERGE_MODE") or "balanced").strip().lower()
+    if mode_raw not in ("safe", "balanced", "auto"):
+        mode_raw = "balanced"
     return Settings(
         export_root=export_root,
         db_path=db_path,
@@ -49,4 +53,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
             os.getenv("DIFFERENT_SENDER_GRACE_SECONDS") or "120"
         ),
         different_sender_max_chars=int(os.getenv("DIFFERENT_SENDER_MAX_CHARS") or "80"),
+        merge_mode=mode_raw,  # type: ignore[arg-type]
     )

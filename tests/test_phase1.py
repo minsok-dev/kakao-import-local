@@ -28,6 +28,7 @@ def _settings(tmp_path: Path, root: Path) -> Settings:
         group_text_max_gap_minutes=30,
         different_sender_grace_seconds=120,
         different_sender_max_chars=80,
+        merge_mode="balanced",
     )
 
 

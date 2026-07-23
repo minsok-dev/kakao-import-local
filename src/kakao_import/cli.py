@@ -1,4 +1,5 @@
 # [변경사유]: Phase1 CLI — init/scan/parse/match/hash/report/run
+# [변경사유]: Phase3 — export-payload / upload (dry-run 기본)
 """Click CLI."""
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import click
 
 from kakao_import import __version__
 from kakao_import import pipeline as pipe
+from kakao_import import upload as upload_mod
 from kakao_import.config import load_settings
 from kakao_import.db import status_counts
 from kakao_import.logging_util import get_logger
@@ -92,6 +94,66 @@ def hash_cmd(ctx: click.Context, root: Path | None) -> None:
     click.echo(f"OK hash → {summary}")
 
 
+@main.command("merge")
+@click.option("--mode", type=click.Choice(["safe", "balanced", "auto"]), default=None)
+@click.pass_context
+def merge_cmd(ctx: click.Context, mode: str | None) -> None:
+    """Phase2: exact SHA 텍스트 collapse/merge."""
+    summary = pipe.cmd_merge(ctx.obj["settings"], mode=mode)
+    click.echo(f"OK merge → {summary}")
+
+
+@main.command("merge-undo")
+@click.option("--id", "merge_id", type=int, default=None, help="text_merge.id")
+@click.option("--sha256", default=None, help="exact SHA (active 1건)")
+@click.pass_context
+def merge_undo_cmd(
+    ctx: click.Context, merge_id: int | None, sha256: str | None
+) -> None:
+    """Phase2: 마지막 active merge 되돌리기 (직전 superseded 복구)."""
+    if merge_id is None and not sha256:
+        raise click.UsageError("--id 또는 --sha256 필요")
+    try:
+        out = pipe.cmd_merge_undo(
+            ctx.obj["settings"], merge_id=merge_id, sha256=sha256
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+@main.command("merge-decide")
+@click.option("--id", "merge_id", type=int, required=True, help="text_merge.id")
+@click.option(
+    "--action",
+    type=click.Choice(["accept", "set-text", "reject"]),
+    required=True,
+    help="accept=병합승인 / set-text=수동문장 / reject=병합포기",
+)
+@click.option("--text", default=None, help="set-text 시 병합 문장")
+@click.option("--note", default=None, help="수동 결정 메모")
+@click.pass_context
+def merge_decide_cmd(
+    ctx: click.Context,
+    merge_id: int,
+    action: str,
+    text: str | None,
+    note: str | None,
+) -> None:
+    """Phase2: review merge 수동 결정."""
+    try:
+        out = pipe.cmd_merge_decide(
+            ctx.obj["settings"],
+            merge_id=merge_id,
+            action=action,
+            text=text,
+            note=note,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 @main.command("report")
 @click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
 @click.option("--json", "as_json", is_flag=True, help="JSON 출력")
@@ -101,7 +163,10 @@ def report_cmd(
     ctx: click.Context, root: Path | None, as_json: bool, output: Path | None
 ) -> None:
     """매칭 리포트."""
-    report = pipe.build_report(ctx.obj["settings"], _root_opt(ctx, root) if root or ctx.obj["settings"].export_root else None)
+    report = pipe.build_report(
+        ctx.obj["settings"],
+        _root_opt(ctx, root) if root or ctx.obj["settings"].export_root else None,
+    )
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if output:
         output.write_text(text, encoding="utf-8")
@@ -109,8 +174,14 @@ def report_cmd(
     elif as_json:
         click.echo(text)
     else:
-        click.echo(f"rooms={report['rooms']} messages={report['messages']} photo_msgs={report['photo_messages']}")
-        click.echo(f"photos={report['photos']} confidence={report['confidence']} exact={report['exact_groups']}")
+        click.echo(
+            f"rooms={report['rooms']} messages={report['messages']} "
+            f"photo_msgs={report['photo_messages']}"
+        )
+        click.echo(
+            f"photos={report['photos']} confidence={report['confidence']} "
+            f"exact={report['exact_groups']} text_merge={report.get('text_merge')}"
+        )
         eg = report.get("esencia_golden") or {}
         click.echo(f"esencia_golden passed={eg.get('passed')} reasons={eg.get('reasons')}")
         click.echo(f"review_pending={len(report.get('review_required') or [])}")
@@ -121,13 +192,13 @@ def report_cmd(
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
 def run_cmd(ctx: click.Context, root: Path | None, as_json: bool) -> None:
-    """Phase 1 전체: init(필요시)→scan→parse→match→hash→report."""
+    """Phase1+2: init(필요시)→scan→parse→match→hash→merge→report."""
     out = pipe.cmd_run(ctx.obj["settings"], _root_opt(ctx, root))
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     else:
         click.echo(f"OK run scan={out['scan']} parse={out['parse']}")
-        click.echo(f"OK run match={out['match']} hash={out['hash']}")
+        click.echo(f"OK run match={out['match']} hash={out['hash']} merge={out.get('merge')}")
         eg = (out.get("report") or {}).get("esencia_golden") or {}
         click.echo(f"OK esencia_golden passed={eg.get('passed')}")
 
@@ -138,6 +209,71 @@ def status_cmd(ctx: click.Context) -> None:
     """DB 건수."""
     for k, v in status_counts(ctx.obj["settings"].db_path).items():
         click.echo(f"{k}: {v}")
+
+
+@main.command("export-payload")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="매니페스트 JSON 경로 (기본 data/last_upload_manifest.json)",
+)
+@click.option("--limit", type=int, default=None, help="최대 item 수")
+@click.option("--room-key", default=None, help="선택적 room_key")
+@click.pass_context
+def export_payload_cmd(
+    ctx: click.Context,
+    output: Path | None,
+    limit: int | None,
+    room_key: str | None,
+) -> None:
+    """Phase3: Import 매니페스트만 생성 (전송 없음)."""
+    settings = ctx.obj["settings"]
+    out = output or (settings.db_path.parent / "last_upload_manifest.json")
+    summary = upload_mod.cmd_export_payload(
+        settings, out=out, limit=limit, room_key=room_key
+    )
+    click.echo(f"OK export-payload → {summary}")
+
+
+@main.command("upload")
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    show_default=True,
+    help="기본 dry-run. 실전송은 --no-dry-run + 세션 쿠키 env",
+)
+@click.option("--limit", type=int, default=None)
+@click.option("--endpoint", default=None, help="예: https://host/api/admin/ingest/import/kakao")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="매니페스트 출력 경로",
+)
+@click.pass_context
+def upload_cmd(
+    ctx: click.Context,
+    root: Path | None,
+    dry_run: bool,
+    limit: int | None,
+    endpoint: str | None,
+    output: Path | None,
+) -> None:
+    """Phase3: Import 업로드 (기본 dry-run). 쿠키 파일 저장 금지."""
+    settings = ctx.obj["settings"]
+    summary = upload_mod.cmd_upload(
+        settings,
+        root=_root_opt(ctx, root),
+        dry_run=dry_run,
+        limit=limit,
+        endpoint=endpoint,
+        out_manifest=output,
+    )
+    click.echo(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

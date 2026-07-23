@@ -10,7 +10,7 @@
 | 입력 샘플 | `input/raw/chats/` + `input/raw/photos/` (gitignore) |
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
 
-관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md)
+관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md)
 
 ---
 
@@ -220,27 +220,43 @@ chats/*.txt 파싱
 
 ### Phase 2 — 텍스트 merge · 모드
 
+**상태: 구현 완료** (`merge` / `merge-undo` / `merge-decide`, `MERGE_MODE`, `sql/002`+`003`)
+
 **기본: balanced**
 
 ```text
 exact 이미지 + 동일 텍스트     → 자동 collapse
 exact 이미지 + 다른 텍스트     → 고유 문장 병합 → 중요 충돌 시 review
-similar / unmatched            → review
+similar / unmatched            → review (similar=Phase4, unmatched=Phase1 matcher)
 ```
 
 옵션: `safe` | `balanced` | `auto`  
-`auto`에서도 **similar 자동 통합 초기 금지**.
+`auto`에서도 **similar 자동 통합 자체 금지**.  
+(현재 `auto`와 `balanced` 병합 로직은 동일 — similar 금지 명시용)
 
 병합 시 보존: 원문, 시각, 출처 메시지 ID, 전/후, 자동·수동 결정, 충돌, **되돌리기**.
+
+| CLI | 역할 |
+|-----|------|
+| `merge [--mode]` | 자동 merge |
+| `merge-undo --id` / `--sha256` | active → superseded, 직전 이력 복구 |
+| `merge-decide --id --action accept\|set-text\|reject` | review 수동 결정 |
 
 ---
 
 ### Phase 3 — Import · 서버 exact · OCR/GPT
 
+**상태**: 3a 접수 API·dry-run upload ✅ — [phase3-import.md](./phase3-import.md)  
+**후속 3b**: 관리자 승인 → OCR/GPT enqueue · contentIdx 연결
+
 **인증 (선결정)**  
 - 초기: `auto_register=off`, 관리자 검수 후 Import  
 - Cookie를 로컬 프로그램에 저장 **금지**  
 - 이후 자동화 시 Import 전용 토큰
+
+**대화 export 크기 (운영)**  
+- PC 내보내기는 전체 이력이 올 수 있음 → 로컬은 전체 파싱, 서버는 인접만  
+- 실서비스: 이전 대화 삭제 후 재다운로드 권장 (도구가 원본 txt 자르지 않음)
 
 **ingest 재사용**
 

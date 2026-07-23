@@ -10,6 +10,8 @@ from typing import Any
 
 from kakao_import.config import Settings
 from kakao_import.db import (
+    SCHEMA_SQL_P2,
+    _apply_phase2b_columns,
     clear_batch_match_data,
     connect,
     finish_batch,
@@ -18,6 +20,7 @@ from kakao_import.db import (
     rebuild_exact_groups,
     replace_messages,
     start_batch,
+    supersede_text_merges,
     update_photo_sha,
     upsert_chat_source,
     upsert_photo,
@@ -25,8 +28,10 @@ from kakao_import.db import (
 from kakao_import.hashutil import sha256_file
 from kakao_import.logging_util import get_logger
 from kakao_import.matcher import PhotoSlot, match_photos_to_messages
+from kakao_import.merge_ops import decide_text_merge, undo_text_merge
 from kakao_import.parser import parse_chat_file
 from kakao_import.photo_name import parse_kakaotalk_filename
+from kakao_import.text_merge import TextBundle, merge_exact_texts
 
 log = get_logger(__name__)
 
@@ -327,6 +332,179 @@ def cmd_hash(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         return {"hashed": len(rows), "updated": updated, **exact}
 
 
+def _ensure_phase2(conn) -> None:
+    """002/003 스키마 없으면 적용."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='text_merge'"
+    ).fetchone()
+    if not row and SCHEMA_SQL_P2.is_file():
+        log.info("apply phase2 schema %s", SCHEMA_SQL_P2.name)
+        conn.executescript(SCHEMA_SQL_P2.read_text(encoding="utf-8"))
+    # [변경사유]: 수동 결정·되돌리기 컬럼
+    _apply_phase2b_columns(conn)
+
+
+def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
+    """assignment → group_text → message 로 설명 수집."""
+    bundle = TextBundle(photo_id=photo_id)
+    rows = conn.execute(
+        """
+        SELECT m.id AS message_id, m.body_raw, m.body_norm, m.abs_time, gt.seq_in_group
+        FROM photo_message_assignment a
+        JOIN group_text gt ON gt.group_id = a.group_id
+        JOIN parsed_message m ON m.id = gt.message_id
+        WHERE a.photo_id = ?
+        ORDER BY gt.seq_in_group
+        """,
+        (photo_id,),
+    ).fetchall()
+    for r in rows:
+        bundle.parts.append(
+            {
+                "message_id": r["message_id"],
+                "body_raw": r["body_raw"],
+                "body_norm": r["body_norm"],
+                "abs_time": r["abs_time"],
+            }
+        )
+    return bundle
+
+
+def cmd_merge(settings: Settings, mode: str | None = None) -> dict[str, Any]:
+    """Phase2: exact SHA 그룹 텍스트 collapse/merge."""
+    merge_mode = mode or settings.merge_mode
+    if merge_mode not in ("safe", "balanced", "auto"):
+        merge_mode = "balanced"
+    with connect(settings.db_path) as conn:
+        _ensure_phase2(conn)
+        supersede_text_merges(conn)
+        groups = conn.execute(
+            "SELECT id, sha256, member_count FROM exact_sha_group"
+        ).fetchall()
+        counts = {"collapse": 0, "merged": 0, "review": 0, "skipped": 0}
+        for g in groups:
+            sha = g["sha256"]
+            members = conn.execute(
+                "SELECT photo_id FROM exact_sha_member WHERE group_id = ? ORDER BY photo_id",
+                (g["id"],),
+            ).fetchall()
+            bundles = [_photo_text_bundle(conn, int(m["photo_id"])) for m in members]
+            result = merge_exact_texts(sha, bundles, merge_mode)  # type: ignore[arg-type]
+            counts[result.decision] = counts.get(result.decision, 0) + 1
+            cur = conn.execute(
+                """
+                INSERT INTO text_merge (
+                  sha256, mode, decision, review_required, merged_text, merged_norm,
+                  before_json, after_json, status, decision_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'auto')
+                """,
+                (
+                    result.sha256,
+                    result.mode,
+                    result.decision,
+                    1 if result.review_required else 0,
+                    result.merged_text,
+                    result.merged_norm,
+                    json.dumps(result.before, ensure_ascii=False),
+                    json.dumps(result.after, ensure_ascii=False) if result.after else None,
+                ),
+            )
+            mid = int(cur.lastrowid)
+            for s in result.sources:
+                conn.execute(
+                    """
+                    INSERT INTO text_merge_source (
+                      merge_id, photo_id, message_id, body_raw, body_norm, abs_time, seq_in_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        mid,
+                        s["photo_id"],
+                        s.get("message_id"),
+                        s["body_raw"],
+                        s.get("body_norm"),
+                        s.get("abs_time"),
+                        s.get("seq_in_source", 0),
+                    ),
+                )
+            for c in result.conflicts:
+                conn.execute(
+                    """
+                    INSERT INTO text_merge_conflict (merge_id, field_name, values_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (mid, c["field_name"], c["values_json"]),
+                )
+            if result.review_required:
+                batch_row = conn.execute(
+                    "SELECT id FROM import_batch ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                batch_id = int(batch_row["id"]) if batch_row else 0
+                if batch_id:
+                    conn.execute(
+                        """
+                        INSERT INTO review_item (
+                          batch_id, kind, ref_type, ref_id, reason, payload_json
+                        ) VALUES (?, 'text_merge', 'text_merge', ?, ?, ?)
+                        """,
+                        (
+                            batch_id,
+                            mid,
+                            result.decision,
+                            json.dumps(
+                                {"sha256": sha[:16], "mode": merge_mode},
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+            log.info(
+                "text_merge sha=%s decision=%s review=%s",
+                sha[:12],
+                result.decision,
+                result.review_required,
+            )
+        conn.commit()
+        return {"mode": merge_mode, "groups": len(groups), **counts}
+
+
+def cmd_merge_undo(
+    settings: Settings,
+    *,
+    merge_id: int | None = None,
+    sha256: str | None = None,
+) -> dict[str, Any]:
+    """Phase2: active text_merge 되돌리기."""
+    with connect(settings.db_path) as conn:
+        _ensure_phase2(conn)
+        out = undo_text_merge(conn, merge_id=merge_id, sha256=sha256)
+        conn.commit()
+        return out
+
+
+def cmd_merge_decide(
+    settings: Settings,
+    *,
+    merge_id: int,
+    action: str,
+    text: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Phase2: review merge 수동 결정."""
+    if action not in ("accept", "set-text", "reject"):
+        raise ValueError("action 은 accept|set-text|reject")
+    with connect(settings.db_path) as conn:
+        _ensure_phase2(conn)
+        out = decide_text_merge(
+            conn,
+            merge_id=merge_id,
+            action=action,  # type: ignore[arg-type]
+            text=text,
+            note=note,
+        )
+        conn.commit()
+        return out
+
+
 def build_report(settings: Settings, root: Path | None = None) -> dict[str, Any]:
     """리포트 dict (절대경로·전문 원문 제외)."""
     root = root or settings.export_root
@@ -356,6 +534,14 @@ def build_report(settings: Settings, root: Path | None = None) -> dict[str, Any]
             )
         ]
         esencia = _esencia_check(conn)
+        merge_stats: dict[str, Any] = {}
+        if conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='text_merge'"
+        ).fetchone():
+            for row in conn.execute(
+                "SELECT decision, COUNT(*) c FROM text_merge WHERE status='active' GROUP BY decision"
+            ):
+                merge_stats[row["decision"]] = row["c"]
         return {
             "rooms": rooms,
             "messages": messages,
@@ -363,6 +549,7 @@ def build_report(settings: Settings, root: Path | None = None) -> dict[str, Any]
             "photos": photos,
             "confidence": conf,
             "exact_groups": exact,
+            "text_merge": merge_stats,
             "review_required": reviews,
             "parse_errors_sample": parse_errors,
             "esencia_golden": esencia,
@@ -406,7 +593,6 @@ def _esencia_check(conn) -> dict[str, Any]:
     if len(gids) != 1 or None in gids:
         ok = False
         reasons.append(f"group_ids={gids}")
-    # group texts
     gid = next(iter(gids)) if gids and None not in gids else None
     text_count = 0
     if gid:
@@ -416,7 +602,6 @@ def _esencia_check(conn) -> dict[str, Any]:
         if text_count < 2:
             ok = False
             reasons.append(f"group_text_count={text_count}")
-    # order by name
     slots = [r.get("slot_index") for r in rows if not r.get("missing")]
     if slots != [0, 1]:
         got = []
@@ -438,7 +623,7 @@ def _esencia_check(conn) -> dict[str, Any]:
 
 
 def cmd_run(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """Phase1 전체."""
+    """Phase1+2: scan→parse→match→hash→merge→report."""
     root = root or settings.export_root
     assert root is not None
     if not settings.db_path.exists():
@@ -448,5 +633,6 @@ def cmd_run(settings: Settings, root: Path | None = None) -> dict[str, Any]:
     out["parse"] = cmd_parse(settings, root)
     out["match"] = cmd_match(settings, root)
     out["hash"] = cmd_hash(settings, root)
+    out["merge"] = cmd_merge(settings)
     out["report"] = build_report(settings, root)
     return out

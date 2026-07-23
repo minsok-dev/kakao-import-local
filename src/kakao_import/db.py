@@ -13,6 +13,8 @@ from kakao_import.logging_util import get_logger
 
 log = get_logger(__name__)
 SCHEMA_SQL = PROJECT_ROOT / "sql" / "001_init_schema.sql"
+SCHEMA_SQL_P2 = PROJECT_ROOT / "sql" / "002_phase2_text_merge.sql"
+SCHEMA_SQL_P2B = PROJECT_ROOT / "sql" / "003_phase2_manual_undo.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -25,14 +27,39 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _apply_phase2b_columns(conn: sqlite3.Connection) -> None:
+    """003: decision_source / manual_note (이미 있으면 skip)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(text_merge)").fetchall()}
+    if not cols:
+        return
+    if "decision_source" not in cols:
+        conn.execute(
+            "ALTER TABLE text_merge ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'auto'"
+        )
+        log.info("schema add column decision_source")
+    if "manual_note" not in cols:
+        conn.execute("ALTER TABLE text_merge ADD COLUMN manual_note TEXT")
+        log.info("schema add column manual_note")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '4')"
+    )
+
+
 def init_schema(db_path: Path, *, reset: bool = False) -> None:
-    """스키마 적용. reset=True면 파일 삭제 후 재생성."""
+    """스키마 적용 (001 + Phase2 002/003). reset=True면 파일 삭제 후 재생성."""
     if reset and db_path.exists():
         db_path.unlink()
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     log.info("init_schema sql=%s", SCHEMA_SQL.name)
     with connect(db_path) as conn:
         conn.executescript(sql)
+        if SCHEMA_SQL_P2.is_file():
+            log.info("init_schema sql=%s", SCHEMA_SQL_P2.name)
+            conn.executescript(SCHEMA_SQL_P2.read_text(encoding="utf-8"))
+        # [변경사유]: 003은 ALTER라 executescript 전체 실패 가능 — 컬럼 가드로 적용
+        if SCHEMA_SQL_P2B.is_file():
+            log.info("init_schema sql=%s (guarded)", SCHEMA_SQL_P2B.name)
+            _apply_phase2b_columns(conn)
         conn.commit()
 
 
@@ -223,13 +250,24 @@ def rebuild_exact_groups(conn: sqlite3.Connection) -> dict[str, int]:
     return {"exact_groups": groups, "excluded_from_upload": excluded}
 
 
+def supersede_text_merges(conn: sqlite3.Connection, sha256: str | None = None) -> None:
+    """active merge를 superseded로 (되돌리기 이력 보존)."""
+    if sha256:
+        conn.execute(
+            "UPDATE text_merge SET status='superseded' WHERE sha256=? AND status='active'",
+            (sha256,),
+        )
+    else:
+        conn.execute("UPDATE text_merge SET status='superseded' WHERE status='active'")
+
+
 def status_counts(db_path: Path) -> dict[str, int]:
     """건수."""
     if not db_path.is_file():
         return {"db_exists": 0}
     with connect(db_path) as conn:
         out: dict[str, int] = {"db_exists": 1}
-        for t in (
+        tables = [
             "import_batch",
             "chat_source",
             "parsed_message",
@@ -239,8 +277,15 @@ def status_counts(db_path: Path) -> dict[str, int]:
             "exact_sha_group",
             "review_item",
             "parse_error",
-        ):
-            row = conn.execute(f"SELECT COUNT(*) AS c FROM {t}").fetchone()
-            out[t] = int(row["c"])
+        ]
+        # Phase2 테이블은 있을 때만
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='text_merge'"
+        ).fetchone()
+        if row:
+            tables.extend(["text_merge", "text_merge_source", "text_merge_conflict"])
+        for t in tables:
+            r = conn.execute(f"SELECT COUNT(*) AS c FROM {t}").fetchone()
+            out[t] = int(r["c"])
             log.info("status table=%s count=%s", t, out[t])
         return out

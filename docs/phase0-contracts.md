@@ -56,7 +56,9 @@ DDL: [sql/001_init_schema.sql](../sql/001_init_schema.sql) (이력·fingerprint 
 - SHA-256 (파일 바이트)  
 - 서버 최종 범위는 Phase 3: OCR·콘텐츠 main/sub, media asset, 과거 Kakao Import (+ 누락 보완)
 
-## 5. Import payload 초안 (Phase 3 — 미전송)
+## 5. Import payload (Phase 3a — 전송 가능, auto_register=off)
+
+상세: [phase3-import.md](./phase3-import.md)
 
 ```json
 {
@@ -88,6 +90,7 @@ DDL: [sql/001_init_schema.sql](../sql/001_init_schema.sql) (이력·fingerprint 
 
 - **절대경로 없음**  
 - 메시지 = 인접/merged만  
+- API는 단건 `item` + multipart `file` (배치는 `batch_id`)
 
 ## 6. 서버 후단 계약 (Phase 3 필수 — 여기서 예고)
 

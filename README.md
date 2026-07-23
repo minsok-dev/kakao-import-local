@@ -19,7 +19,7 @@
 |-------|-----:|------|------|
 | **0** | 지금 | 계약·golden·개인정보 | 레이아웃·시각매칭·1건 golden 확정 |
 | **0.5** | 지금 | signature 조사만 | 대기 |
-| **1** | 최우선 | parser + **시각 matcher** + 이력 + SHA + 리포트 | stub (미완료) |
+| **1** | 최우선 | parser + **시각 matcher** + 이력 + SHA + 리포트 | **구현 완료** (ESENCIA golden 통과) |
 | **1.5** | 이후 | watcher | 예정 |
 | **2** | 다음 | 텍스트 merge | 예정 |
 | **3** | 다음 | Import·exact·OCR/GPT | 예정 |
@@ -47,17 +47,20 @@ copy .env.example .env
 # KAKAO_EXPORT_ROOT=./input/raw  (chats/ + photos/)
 ```
 
-## CLI (Phase 1 stub — 완성 전)
+## CLI (Phase 1)
 
 ```powershell
-kakao-import init-db
-kakao-import scan --root "./input/raw"
-kakao-import match --sha-only
-kakao-import status
+cd F:\site_kdance\TEST_web\kakao-import-local
+.\.venv\Scripts\Activate.ps1
+# KAKAO_EXPORT_ROOT=./input/raw  (chats/ + photos/)
+
+kakao-import init --reset
+kakao-import run          # scan → parse → match → hash → report
+kakao-import report --json
+# 단계별: scan | parse | match | hash | status
 ```
 
-(예정) `parse` / 시각 `match-messages` / `report` — Phase 1 구현 시 추가.
-## 디렉터리
+Phase 1 완료 조건: ESENCIA golden (`KakaoTalk_20260724_005030533/512` ↔ `오전 12:50` 사진 2줄) 자동 통과.## 디렉터리
 
 ```
 kakao-import-local/

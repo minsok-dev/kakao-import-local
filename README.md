@@ -22,7 +22,7 @@
 | **1** | 최우선 | parser + **시각 matcher** + 이력 + SHA + 리포트 | **구현 완료** (ESENCIA golden 통과) |
 | **1.5** | 이후 | watcher | 예정 |
 | **2** | 다음 | 텍스트 merge | **구현 완료** (safe/balanced/auto) |
-| **3** | 다음 | Import·exact·OCR/GPT | **3a 접수·안전** (`automated tests passed / staging manual verification pending`) · **3b 승인→OCR 최소** ([phase3-import.md](./phase3-import.md)) |
+| **3** | 다음 | Import·exact·OCR/GPT | **3a·3b** `automated tests passed / staging manual verification pending` (함께 검증) · UI `/admin_w/ingest/import` · [phase3-import.md](./phase3-import.md) |
 | **4** | 이후 | similar 그룹 UI | 예정 |
 | **5** | 마지막 | 제한 자동 승인 | 예정 |
 

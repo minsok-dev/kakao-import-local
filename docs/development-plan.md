@@ -247,9 +247,9 @@ similar / unmatched            → review (similar=Phase4, unmatched=Phase1 matc
 ### Phase 3 — Import · 서버 exact · OCR/GPT
 
 **상태**:  
-- 3a 접수·안전 ✅ — `Phase 3a automated tests passed / staging manual verification pending`  
-- 3b 승인→OCR 최소 ✅ — [phase3-import.md](./phase3-import.md)  
-**미포함**: similar, watcher, 자동 승인, 카카오 자동 수집
+- 3a 접수·안전 ✅ — `automated tests passed / staging manual verification pending`  
+- 3b 승인→OCR + 최소 UI ✅ — [phase3-import.md](./phase3-import.md) (`staging manual verification pending`, **3a와 함께 검증**)  
+**미포함**: similar, watcher, 자동 승인, 카카오 자동 수집, DDL 추가
 
 **인증 (선결정)**  
 - 초기: `auto_register=off`, 관리자 검수 후 Import  
@@ -283,12 +283,16 @@ ImportItem
 → matched/merged message 저장
 → OCR + importItemId
 → OCR text + Kakao 인접 메시지 → GPT
-→ contentIdx → ImportItem
+→ contentIdx → ImportItem (캐시)
 ```
+
+- **contentIdx SSOT**: `tbl_ocrcontent.migrated_content_idx`
+- **Import `response_json.content_idx`**: 상세 조회 시 lazy sync 캐시 (승인 직후 null)
+- **auto_migrate=0**: 승인 후 OCR/GPT만 · 이관은 관리자 OCR 검수 후
 
 ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
-관리자 UI: Import 접수 목록(얇게) + 기존 OCR/콘텐츠 검수.
+관리자 UI: `/admin_w/ingest/import` 목록·상세 + 기존 OCR/콘텐츠 검수.
 
 ---
 

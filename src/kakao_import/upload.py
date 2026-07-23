@@ -98,7 +98,7 @@ def upload_one(
         },
     )
     log.info(
-        "upload_one sha=%s file=%s",
+        "upload_one sha_prefix=%s file=%s",
         str(body_payload.get("item", {}).get("sha256", ""))[:12],
         file_path.name,
     )

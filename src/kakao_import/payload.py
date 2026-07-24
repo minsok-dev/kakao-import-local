@@ -15,6 +15,9 @@ from kakao_import.logging_util import get_logger
 
 log = get_logger(__name__)
 
+# [변경사유]: 서버 KAKAO_IMPORT_MAX_FILE_BYTES(15MiB) 와 맞춤 — 초과 파일은 전송 전 스킵
+MAX_UPLOAD_FILE_BYTES = 15 * 1024 * 1024
+
 INSTANCE_FILE = PROJECT_ROOT / "data" / "client_instance_id.txt"
 
 
@@ -55,6 +58,7 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
               p.id AS photo_id,
               p.rel_path,
               p.file_name,
+              p.byte_size,
               m.decision AS merge_decision,
               m.merged_text,
               m.id AS merge_id
@@ -80,6 +84,20 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             # [변경사유]: 절대경로 금지 — photos/ 상대만
             if rel_path.startswith("/") or (len(rel_path) > 1 and rel_path[1] == ":"):
                 log.warning("skip absolute rel_path photo_id=%s", photo_id)
+                continue
+
+            # [변경사유]: 15MB 초과는 서버가 413 — 후보에서 제외하고 다음 건 선택
+            byte_size = int(row["byte_size"] or 0)
+            abs_photo = (settings.export_root / rel_path) if settings.export_root else None
+            if abs_photo is not None and abs_photo.is_file():
+                byte_size = abs_photo.stat().st_size
+            if byte_size > MAX_UPLOAD_FILE_BYTES:
+                log.warning(
+                    "skip oversized photo_id=%s bytes=%s max=%s",
+                    photo_id,
+                    byte_size,
+                    MAX_UPLOAD_FILE_BYTES,
+                )
                 continue
 
             matched: list[dict[str, Any]] = []

@@ -65,11 +65,12 @@ def upload_one(
     filename = file_path.name
 
     parts: list[bytes] = []
+    # [변경사유]: payload에 Content-Type을 넣으면 formidable이 필드를 파일로 취급
+    # → maxFiles=1 초과(http 413) → 서버가 FILE_TOO_LARGE로 오인. 텍스트 필드는 mimetype 없이 전송.
     parts.append(
         (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="payload"\r\n'
-            f"Content-Type: application/json; charset=utf-8\r\n\r\n"
+            f'Content-Disposition: form-data; name="payload"\r\n\r\n'
         ).encode()
         + payload_bytes
         + b"\r\n"
@@ -168,6 +169,26 @@ def cmd_upload(
                     "ok": False,
                     "error": "file_missing",
                     "rel": rel,
+                }
+            )
+            continue
+        # [변경사유]: 전송 직전 크기 재확인 (DB byte_size drift 대비)
+        try:
+            sz = file_path.stat().st_size
+        except OSError:
+            sz = -1
+        if sz > 15 * 1024 * 1024:
+            log.warning(
+                "skip upload oversized rel=%s bytes=%s",
+                rel,
+                sz,
+            )
+            results.append(
+                {
+                    "ok": False,
+                    "error": "FILE_TOO_LARGE_LOCAL",
+                    "rel": rel,
+                    "bytes": sz,
                 }
             )
             continue

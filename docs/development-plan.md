@@ -131,7 +131,7 @@ ImportItem → matched/merged message 저장
 | **1** | **최우선** | parser + **시각 matcher** + 이력 + SHA + 리포트 | **위 golden 자동 통과** |
 | **1.5** | 이후 | watcher / 자동 실행 | Phase 1 통과 후 |
 | **2** | 다음 | 텍스트 정규화·merge·safe/balanced/auto | 충돌·되돌리기 보존 |
-| **3** | 다음 | Import·인증·서버 exact 범위·OCR/GPT | 스테이징 1건 E2E |
+| **3** | 다음 | Import·인증·서버 exact·OCR/GPT → **단계1: OCR 직행 + exact_hold** | 스테이징 E2E |
 | **4** | 이후 | similar + **그룹 합침/분리 UI** | review only |
 | **5** | 마지막 | 제한 자동 승인 | 화이트리스트만 |
 

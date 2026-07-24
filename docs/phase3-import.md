@@ -1,119 +1,62 @@
-# Phase 3 — Import API · 서버 exact · OCR/GPT 승인
+# Phase 3 — 카카오 Import → OCR 직행 (exact hold)
 
-<!-- [변경사유]: Phase3a 접수·안전 / Phase3b 승인·OCR·최소 UI / contentIdx SSOT -->
+<!-- [변경사유]: 단계1 — Import 승인 게이트 축소, OCR 목록 exact 확인과 통일 -->
 
 | 항목 | 내용 |
 |------|------|
-| 상태 | **3a 접수·안전** / **3b 승인→OCR + 최소 관리자 UI** |
+| 상태 | **접수 → OCR 직행 / exact_hold** |
 | 기준일 | 2026-07-24 |
-| Phase 3a | `automated tests passed / staging manual verification pending` |
-| Phase 3b | `automated tests passed / staging manual verification pending` (3a와 함께 검증) |
+| 상세(프론트) | `frontend/docs/image-dup-review-phase1.md` |
 
-## 상태 흐름 (3b)
+## 상태 흐름 (현행)
 
 ```text
-received
-  ├─ reject → failed (admin_action=reject, OCR/GPT 없음)
-  └─ approve → processing(조건부 claim) → accepted (ocr_idx, next=ocr_queued)
-       └─ OCR/GPT (auto_migrate=0) → 관리자 OCR 검수·이관
-            └─ 상세 GET 시 content_idx 캐시 sync (next=done)
-
-duplicate_exact
-  ├─ skip → duplicate_exact (admin_action=skip, OCR 없음)
-  ├─ reuse_asset → accepted (기존 asset 링크 + OCR, auto_migrate=0)
-  └─ reject → failed
+upload POST /api/admin/ingest/import/kakao
+  ├─ 신규 → tbl_ocrcontent 생성 + OCR/GPT 자동
+  │         Import row status=accepted, next=ocr_queued
+  └─ exact → tbl_ocrcontent exact_hold (OCR/GPT 금지)
+            Import row status=duplicate_exact, next=dup_review
+            → 관리자 OCR 목록에서 등록 안 함 | 기존으로 OCR
 ```
 
-`auto_register=false` 유지. **승인 전**에는 OCR/GPT/job/content 생성 없음.
+Import **승인 API/UI는 레거시**로 남길 수 있으나, 정상 경로에서는 사용하지 않는다.  
+중복·등록 여부는 **OCR 목록**에서 처리한다.
 
-### auto_migrate=0
+### auto_migrate
 
-- 승인 후 **OCR 생성 + GPT 구조화까지**만 진행한다.
-- **콘텐츠 이관은 하지 않는다.** 관리자가 OCR 검수 화면에서 확인한 뒤 이관한다.
+카카오 OCR 생성 시 `auto_migrate=0` (검수 후 이관). 포스터 업로드(`auto_migrate=1`)와 다를 수 있음.
 
-### contentIdx SSOT / 캐시
+### contentIdx SSOT
 
-| 구분 | 위치 | 역할 |
-|------|------|------|
-| **SSOT** | `tbl_ocrcontent.migrated_content_idx` | 이관된 content의 진실 원천 |
-| **캐시** | Import `response_json.content_idx` | 상세 조회(`GET .../import/[id]`) 시 SSOT에서 lazy 동기화 |
-
-승인 직후 `content_idx`는 항상 `null`이다.
-
-### 동시 승인 · processing 고착
-
-`UPDATE ... SET status='processing' WHERE request_idx=? AND status IN (...)`  
-조건부 claim으로 **OCR은 1건만** 생성. 패자는 `IN_PROGRESS` 또는 기존 `ocr_idx` 멱등 재생.
-
-| 상황 | 동작 |
+| 구분 | 위치 |
 |------|------|
-| 정상 오류 (OCR 전) | `failed` 로 복구 → 관리자 재시도 |
-| OCR 생성 후 후속 실패 | `accepted` + `ocr_idx` 보존 (재생성 없음) |
-| `processing` + `ocr_idx` | `accepted` 치유 + 기존 OCR 반환 |
-| `processing` + ocr 없음 + **5분 미만** | `IN_PROGRESS` |
-| `processing` + ocr 없음 + **5분 이상** | stale 재claim (`mod_date` CAS) → 재시도 (UI: 고착 재시도) |
-
-별도 worker/상태머신 없음.
+| SSOT | `tbl_ocrcontent.migrated_content_idx` |
+| 캐시 | Import `response_json` (상세 GET lazy sync) |
 
 ## API
 
 | Method | Path | 역할 |
 |--------|------|------|
-| POST | `/api/admin/ingest/import/kakao` | 3a 접수 |
-| GET | `/api/admin/ingest/import` | 목록 |
-| GET | `/api/admin/ingest/import/[id]` | 상세 (+ content_idx sync) |
-| POST | `/api/admin/ingest/import/[id]/approve` | `{ action, note? }` |
-| POST | `/api/admin/ingest/import/[id]/reject` | `{ reason }` |
+| POST | `/api/admin/ingest/import/kakao` | 접수 + OCR 생성(또는 exact_hold) |
+| GET | `/api/admin/ingest/import` | 목록(추적·멱등) |
+| GET | `/api/admin/ingest/import/[id]` | 상세 |
+| POST | `/api/admin/ocr_data/[id]/resolve_duplicate` | exact_hold 결정 |
 
-approve `action`:
-- `received` → `approve`
-- `duplicate_exact` → `skip` \| `reuse_asset`
+레거시: `.../import/[id]/approve|reject` — 단계1 정상 경로 비권장.
 
-권한: `super_admin` + same-origin.
+## 로컬 업로드
 
-## GPT 참고
+```text
+kakao-import upload --no-dry-run --limit N --endpoint $KAKAO_IMPORT_ENDPOINT
+```
 
-- `sns_caption_text`에 `<<<KAKAO_ADJACENT_REF>>>` + 인접/merged만
-- 길이·건수 상한 (전체 TXT 금지; backend도 동일 상한 truncate)
-- backend `openai_helper`: 카카오 참고는 명령 금지·충돌 시 필드 비움·원문 INFO 로그 미노출
-- OCR `auto_migrate=0` → 기존 OCR 검수 후 이관
+- `KAKAO_IMPORT_SESSION_COOKIE` (파일 저장 금지)
+- payload part에 `Content-Type: application/json` **넣지 않음** (formidable maxFiles 오인 방지)
 
-## DDL
+## 스테이징
 
-신규 DDL 없음. 계보·멱등은 `response_json`(ocr_idx/content_idx/admin_action) + UNIQUE idempotency.
+프론트 `docs/image-dup-review-phase1.md` §스테이징 + DDL `015` 적용 후:
 
-## 관리자 UI
-
-| 경로 | 역할 |
-|------|------|
-| `/admin_w/ingest/import` | 목록 (status 필터) |
-| `/admin_w/ingest/import/[id]` | 상세: 이미지·인접 메시지·exact·승인/skip/reuse/거절 · OCR/content 링크 |
-
-메뉴: 수집 관리 → 카카오 Import. 권한 `super_admin`.
-
-## 스테이징 검증 (운영자) — 3a + 3b 함께
-
-> 상태: **pending** (자동 테스트만 통과). 아래를 한 번에 수행한다.
-
-### A. Phase 3a 접수
-1. 정상 접수 → `received`, staging raw 존재, **OCR/GPT 미생성**
-2. 동일 idempotency 재전송 → 멱등 재생
-3. SHA 불일치·비이미지 → 거부
-4. exact 매칭 → `duplicate_exact` (자동 skip/OCR 없음)
-
-### B. Phase 3b 승인·UI
-1. 관리자 UI `/admin_w/ingest/import` 목록·상세 확인
-2. `received` **신규 승인** → OCR 1건 · `sns_caption_text`에 카카오 마커 · DB `auto_migrate=0`
-3. 동일 건 재승인 / 더블클릭 → 같은 `ocr_idx` (멱등·중복 클릭 방지)
-4. 거절 → OCR 없음, 사유 저장
-5. `duplicate_exact` → UI에서 skip / reuse_asset
-6. OCR 검수(`/admin_w/ocr_data/{ocr_idx}`)에서 이관 후 Import 상세 재조회 → `content_idx` 캐시 반영
-7. 비관리자·다른 Origin → 거부
-8. **고착**: 승인 중 프로세스 중단 후 `processing`+ocr없음 → 5분 후 UI「고착 재시도」→ OCR 1건
-9. **고착**: `processing`+`ocr_idx` 남은 경우 재승인 → accepted 치유·동일 OCR
-10. 의도적 오류(raw 삭제 등) → `failed` 후 「실패 건 재시도」가능
-
-## 코드
-
-- frontend: `lib/ingest/import/approveKakaoImport.ts` (claim), `rejectKakaoImport.ts`, `createOcrFromKakaoImport.ts`, `formatKakaoGptRef.ts`, `pages/api/.../import/**`, `pages/admin_w/ingest/import/**`
-- backend: `app/openai_helper.py`, `tests/test_openai_helper_kakao_ref.py`
+1. 신규 업로드 → OCR 목록에 일반 행 + OCR 진행
+2. exact → `exact 확인` 배지, OCR 미진행
+3. 등록 안 함 / 기존으로 OCR

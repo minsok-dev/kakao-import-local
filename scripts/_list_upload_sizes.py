@@ -4,7 +4,7 @@ from kakao_import.db import connect
 s = load_settings()
 root = s.export_root
 print("export_root", root)
-max_bytes = 15 * 1024 * 1024
+max_bytes = 50 * 1024 * 1024
 with connect(s.db_path) as conn:
     rows = conn.execute(
         """

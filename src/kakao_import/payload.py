@@ -15,8 +15,15 @@ from kakao_import.logging_util import get_logger
 
 log = get_logger(__name__)
 
-# [변경사유]: 서버 KAKAO_IMPORT_MAX_FILE_BYTES(15MiB) 와 맞춤 — 초과 파일은 전송 전 스킵
-MAX_UPLOAD_FILE_BYTES = 15 * 1024 * 1024
+# [변경사유]: 서버 KAKAO_IMPORT_MAX_INGRESS_BYTES(50MiB) 와 맞춤 — 초과만 전송 전 거부
+MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
+# [변경사유]: 예전 15MiB 하드 스킵 제거 확인용 (회귀 테스트)
+LEGACY_HARD_SKIP_BYTES = 15 * 1024 * 1024
+
+
+def exceeds_ingress_limit(byte_size: int) -> bool:
+    """수신 상한(50MiB) 초과 여부. 15MiB 초과는 허용."""
+    return int(byte_size) > MAX_UPLOAD_FILE_BYTES
 
 INSTANCE_FILE = PROJECT_ROOT / "data" / "client_instance_id.txt"
 
@@ -86,14 +93,14 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                 log.warning("skip absolute rel_path photo_id=%s", photo_id)
                 continue
 
-            # [변경사유]: 15MB 초과는 서버가 413 — 후보에서 제외하고 다음 건 선택
+            # [변경사유]: 50MiB ingress 초과만 제외 (서버와 동일). 선최적화(Pillow) 없음
             byte_size = int(row["byte_size"] or 0)
             abs_photo = (settings.export_root / rel_path) if settings.export_root else None
             if abs_photo is not None and abs_photo.is_file():
                 byte_size = abs_photo.stat().st_size
-            if byte_size > MAX_UPLOAD_FILE_BYTES:
+            if exceeds_ingress_limit(byte_size):
                 log.warning(
-                    "skip oversized photo_id=%s bytes=%s max=%s",
+                    "skip oversized photo_id=%s bytes=%s max=%s error=FILE_EXCEEDS_INGRESS_LIMIT",
                     photo_id,
                     byte_size,
                     MAX_UPLOAD_FILE_BYTES,

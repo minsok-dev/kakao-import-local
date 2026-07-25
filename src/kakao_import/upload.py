@@ -12,7 +12,11 @@ from urllib.request import Request, urlopen
 
 from kakao_import.config import Settings
 from kakao_import.logging_util import get_logger
-from kakao_import.payload import build_batch_manifest, write_manifest
+from kakao_import.payload import (
+    build_batch_manifest,
+    exceeds_ingress_limit,
+    write_manifest,
+)
 
 log = get_logger(__name__)
 
@@ -172,21 +176,21 @@ def cmd_upload(
                 }
             )
             continue
-        # [변경사유]: 전송 직전 크기 재확인 (DB byte_size drift 대비)
+        # [변경사유]: 전송 직전 크기 재확인 — 50MiB ingress (서버와 동일). Pillow 선최적화 없음
         try:
             sz = file_path.stat().st_size
         except OSError:
             sz = -1
-        if sz > 15 * 1024 * 1024:
+        if exceeds_ingress_limit(sz):
             log.warning(
-                "skip upload oversized rel=%s bytes=%s",
+                "skip upload oversized rel=%s bytes=%s error=FILE_EXCEEDS_INGRESS_LIMIT",
                 rel,
                 sz,
             )
             results.append(
                 {
                     "ok": False,
-                    "error": "FILE_TOO_LARGE_LOCAL",
+                    "error": "FILE_EXCEEDS_INGRESS_LIMIT",
                     "rel": rel,
                     "bytes": sz,
                 }

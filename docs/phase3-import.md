@@ -58,6 +58,41 @@ kakao-import upload --no-dry-run --limit N --endpoint $KAKAO_IMPORT_ENDPOINT
 
 - `KAKAO_IMPORT_SESSION_COOKIE` (파일 저장 금지)
 - payload part에 `Content-Type: application/json` **넣지 않음** (formidable maxFiles 오인 방지)
+- **파일 상한**: 수신(ingress) **50MiB**. 초과 시 로컬 `FILE_EXCEEDS_INGRESS_LIMIT` / 서버 413.
+- **선최적화(Pillow) 없음** — 원본 전송 후 서버가 크롤과 동일 `optimizeIngestImageBuffer` 적용.
+- SHA: 로컬·payload = **원본** SHA(무결성). exact/OCR = 서버 **최적화 후** SHA.
+
+### 운영(스테이징/상용) — Nginx 등 앞단
+
+앱 파일 제한만 올려도 프록시가 막으면 API에 도달하지 않습니다. **코드가 아니라 인프라 적용**.
+
+| 항목 | 권장 값 |
+|------|---------|
+| 앱 `KAKAO_IMPORT_MAX_INGRESS_BYTES` | **50MiB** |
+| Nginx `client_max_body_size` | **55~60m** (multipart 오버헤드) |
+| proxy/FastCGI `*_read_timeout` / `send_timeout` | 대용량 업로드에 맞게 (예: 120s+) |
+| Cloudflare | Business 미만 본문 한도 확인 (필요 시 우회/직접 origin) |
+
+스테이징 적용 예:
+
+```nginx
+# /etc/nginx/sites-available/danceinfo-staging (발췌)
+client_max_body_size 60m;
+proxy_read_timeout 120s;
+proxy_send_timeout 120s;
+```
+
+적용 후: `sudo nginx -t && sudo systemctl reload nginx`
+
+### 스테이징 E2E (대용량·최적화)
+
+1. 15~40MiB 카카오 원본 JPEG 1장 준비 (로컬 photos/)
+2. `kakao-import upload --dry-run` — 해당 파일이 스킵되지 않는지
+3. `--no-dry-run` 전송 → 200, 응답 `source_sha256`·`final_sha256_prefix`(12자)·`optimized` (전체 final SHA는 API 미노출)
+4. DB/로그: `ingressBytes` / `optimizedBytes` / SHA prefix만 (전체 SHA·경로 없음)
+5. 동일 원본을 크롤 경로로도 넣으면 **final SHA 일치** (서버 동일 optimizer)
+6. 50MiB+ → 로컬·서버 모두 거부
+7. payload SHA 조작 → 400 `SHA_MISMATCH`
 
 ## 스테이징 (정책 반영 후)
 

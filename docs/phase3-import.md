@@ -1,30 +1,34 @@
-# Phase 3 — 카카오 Import → OCR 직행 (exact hold)
+# Phase 3 — 카카오 Import → 공통 exact / OCR 입구
 
-<!-- [변경사유]: 단계1 — Import 승인 게이트 축소, OCR 목록 exact 확인과 통일 -->
+<!-- [변경사유]: 2026-07-25 — exact 전건 hold 폐기. SNS 병합·auto_migrate·F hold. 프론트 정책 문서 기준 -->
 
 | 항목 | 내용 |
 |------|------|
-| 상태 | **접수 → OCR 직행 / exact_hold** |
-| 기준일 | 2026-07-24 |
-| 상세(프론트) | `frontend/docs/image-dup-review-phase1.md` |
+| 상태 | **정책 확정 · 프론트 코드는 교체 예정** |
+| 기준일 | 2026-07-25 |
+| 확정 정책 | `frontend/docs/image-exact-sns-merge-policy.md` |
+| 개발 계획 | `frontend/docs/image-exact-sns-merge-dev-plan.md` |
+| 이전(폐기) | exact → 전부 OCR `exact_hold` (`image-dup-review-phase1.md`) |
 
-## 상태 흐름 (현행)
+## 목표 상태 흐름
 
 ```text
 upload POST /api/admin/ingest/import/kakao
-  ├─ 신규 → tbl_ocrcontent 생성 + OCR/GPT 자동
-  │         Import row status=accepted, next=ocr_queued
-  └─ exact → tbl_ocrcontent exact_hold (OCR/GPT 금지)
-            Import row status=duplicate_exact, next=dup_review
-            → 관리자 OCR 목록에서 등록 안 함 | 기존으로 OCR
+  ├─ 신규 → OCR 생성 + OCR/GPT → auto_migrate로 콘텐츠 자동 이관
+  ├─ exact + 콘텐츠/OCR → SNS 수집 본문만 추가 (OCR 안 만듦 / hold 아님)
+  ├─ exact + reusable asset만 → OCR 행만 (GPT 자동 없음)
+  └─ exact 예외(F) → OCR + exact_hold (GPT 금지) → OCR 목록에서 처리
 ```
 
-Import **승인 API/UI는 레거시**로 남길 수 있으나, 정상 경로에서는 사용하지 않는다.  
-중복·등록 여부는 **OCR 목록**에서 처리한다.
+크롤과 **exact 이후는 동일 공통 서비스**. Import 테이블은 당분간 입구·멱등·추적용.  
+(카카오→크롤 raw 통합은 후속. 이번 범위 외.)
+
+Import **승인 API/UI는 레거시**. happy path에서 사용하지 않는다.
 
 ### auto_migrate
 
-카카오 OCR 생성 시 `auto_migrate=0` (검수 후 이관). 포스터 업로드(`auto_migrate=1`)와 다를 수 있음.
+- **확정**: 카카오 **신규**도 크롤·포스터 업로드와 같이 자동 이관 가능하게 맞춤 (`auto_migrate=1` 또는 소스 플래그).
+- **현재 코드**: `createOcrFromKakaoImport`가 `auto_migrate=0`일 수 있음 → 개발 계획 P4에서 정합.
 
 ### contentIdx SSOT
 
@@ -33,16 +37,18 @@ Import **승인 API/UI는 레거시**로 남길 수 있으나, 정상 경로에�
 | SSOT | `tbl_ocrcontent.migrated_content_idx` |
 | 캐시 | Import `response_json` (상세 GET lazy sync) |
 
+exact로 콘텐츠에만 SNS를 붙인 경우 OCR이 없으므로 `contentIdx`는 Import 추적 JSON 등에 필요 시 기록 (구현 시 계획 문서).
+
 ## API
 
 | Method | Path | 역할 |
 |--------|------|------|
-| POST | `/api/admin/ingest/import/kakao` | 접수 + OCR 생성(또는 exact_hold) |
+| POST | `/api/admin/ingest/import/kakao` | 접수 + 공통 exact/신규 처리 |
 | GET | `/api/admin/ingest/import` | 목록(추적·멱등) |
 | GET | `/api/admin/ingest/import/[id]` | 상세 |
-| POST | `/api/admin/ocr_data/[id]/resolve_duplicate` | exact_hold 결정 |
+| POST | `/api/admin/ocr_data/[id]/resolve_duplicate` | **F** exact_hold 결정 |
 
-레거시: `.../import/[id]/approve|reject` — 단계1 정상 경로 비권장.
+레거시: `.../import/[id]/approve|reject` — 정상 경로 비권장.
 
 ## 로컬 업로드
 
@@ -53,10 +59,10 @@ kakao-import upload --no-dry-run --limit N --endpoint $KAKAO_IMPORT_ENDPOINT
 - `KAKAO_IMPORT_SESSION_COOKIE` (파일 저장 금지)
 - payload part에 `Content-Type: application/json` **넣지 않음** (formidable maxFiles 오인 방지)
 
-## 스테이징
+## 스테이징 (정책 반영 후)
 
-프론트 `docs/image-dup-review-phase1.md` §스테이징 + DDL `015` 적용 후:
+프론트 정책·개발 계획 체크리스트 기준:
 
-1. 신규 업로드 → OCR 목록에 일반 행 + OCR 진행
-2. exact → `exact 확인` 배지, OCR 미진행
-3. 등록 안 함 / 기존으로 OCR
+1. 신규 → OCR/GPT → 콘텐츠 자동 이관
+2. exact+콘텐츠 → SNS만 추가, OCR 목록에 hold 안 쌓임
+3. F만 `exact 확인` 필터에 표시

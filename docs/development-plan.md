@@ -131,7 +131,7 @@ ImportItem → matched/merged message 저장
 | **1** | **최우선** | parser + **시각 matcher** + 이력 + SHA + 리포트 | **위 golden 자동 통과** |
 | **1.5** | 이후 | watcher / 자동 실행 | Phase 1 통과 후 |
 | **2** | 다음 | 텍스트 정규화·merge·safe/balanced/auto | 충돌·되돌리기 보존 |
-| **3** | 다음 | Import·인증·서버 exact·OCR/GPT → **단계1: OCR 직행 + exact_hold** | 스테이징 E2E |
+| **3** | 다음 | Import·인증·서버 exact → **SNS 병합 공통 서비스** (exact 전건 hold 폐기 · F만 hold) | 프론트 정책 문서·스테이징 E2E |
 | **4** | 이후 | similar + **그룹 합침/분리 UI** | review only |
 | **5** | 마지막 | 제한 자동 승인 | 화이트리스트만 |
 
@@ -248,8 +248,8 @@ similar / unmatched            → review (similar=Phase4, unmatched=Phase1 matc
 
 **상태**:  
 - 3a 접수·안전 ✅ — `automated tests passed / staging manual verification pending`  
-- 3b 승인→OCR + 최소 UI ✅ — [phase3-import.md](./phase3-import.md) (`staging manual verification pending`, **3a와 함께 검증**)  
-**미포함**: similar, watcher, 자동 승인, 카카오 자동 수집, DDL 추가
+- 3b 승인→OCR + 최소 UI ✅ — [phase3-import.md](./phase3-import.md) (이후 **exact SNS 병합**으로 교체 예정 · `frontend/docs/image-exact-sns-merge-policy.md`)
+**미포함**: similar 차단 본구현, watcher, 자동 승인, 카카오→raw 통합, 카카오 자동 수집
 
 **인증 (선결정)**  
 - 초기: `auto_register=off`, 관리자 검수 후 Import  
@@ -288,7 +288,7 @@ ImportItem
 
 - **contentIdx SSOT**: `tbl_ocrcontent.migrated_content_idx`
 - **Import `response_json.content_idx`**: 상세 조회 시 lazy sync 캐시 (승인 직후 null)
-- **auto_migrate=0**: 승인 후 OCR/GPT만 · 이관은 관리자 OCR 검수 후
+- **auto_migrate**: 확정 정책상 카카오 **신규**는 크롤과 같이 자동 이관 정합 (`frontend/docs/image-exact-sns-merge-policy.md`). 현재 코드 `0`이면 개발 계획 P4에서 변경.
 
 ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 

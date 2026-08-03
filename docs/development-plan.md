@@ -331,14 +331,17 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
 ### Phase 4 — Similar · 그룹 결정 UI
 
-**착수 조건:** Phase **3.5** + E2E 완료 후.
+**착수 조건:**  
+- **업로드 제어·시각 리뷰 UI (4.2+):** Phase **3.5** + E2E 완료 후.  
+- **탐지-only (4.0):** signature + 그룹 탐지 + 로그/(선택) decision 저장 — upload 미변경이면 **3.5와 병렬 가능**.
 
 - Phase 0.5에서 고른 방식으로 signature  
-- **N≥2 그룹**: `merge_all` / `separate_all` / `partial` / `deferred`  
-- 재결정: `re_merge` / `split` (전송 전=로컬 decision)  
-- **시각 리뷰 UI 필수** (Python 로컬 웹 또는 관리자 Next — Phase 4 착수 시 선택)  
-- similar 자동 통합 없음  
-- 서버 Similar hold가 이미 있으므로, 로컬 similar는 **운영 보조 UI** 성격 (중복 방지 본경로 아님)
+- **N≥2 그룹 content decision:** `same_content` / `different_content` / `partial` / `deferred`  
+- **upload policy (decision과 분리):** `same_content` → 대표 1장, `different_content` → 전체, `deferred` → 없음  
+- 재결정: 전송 전 로컬 decision만 변경 (원본 파일 불변)  
+- **시각 리뷰 UI 필수** (Python 로컬 웹 또는 관리자 Next — Phase 4 본구현 착수 시 선택)  
+- similar **자동 병합·자동 삭제 없음**  
+- 서버 Similar hold가 이미 있으므로, 로컬 similar는 **배치 안 정리·운영 보조** (서비스 전체 중복 방지 본경로 아님)
 
 → [similar-group-decisions.md](./similar-group-decisions.md)
 

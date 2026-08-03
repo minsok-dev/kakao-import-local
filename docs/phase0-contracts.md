@@ -69,7 +69,7 @@ DDL: [sql/001_init_schema.sql](../sql/001_init_schema.sql) (이력·fingerprint 
   "items": [
     {
       "local_item_id": "string",
-      "decision": "merge_all|separate_all|partial|upload_one",
+      "decision": "same_content|different_content|partial|deferred|upload_one",
       "sha256": "hex",
       "rel_path": "string",
       "matched_messages": [
@@ -107,9 +107,10 @@ crawl `skipped_dup` 정책을 카카오 Import에 그대로 적용하지 않음.
 
 ## 7. Similar 그룹 (Phase 4, 계약 예고)
 
-<!-- [변경사유]: Phase 4는 Phase 3.5 운영 안정화·E2E 이후. 상세: phase3-ops-stabilization.md -->
+<!-- [변경사유]: 업로드 제어·UI는 Phase 3.5·E2E 이후. 탐지-only는 병렬 가능. 상세: similar-group-decisions.md -->
 
-[similar-group-decisions.md](./similar-group-decisions.md)
+[similar-group-decisions.md](./similar-group-decisions.md)  
+decision: `same_content` / `different_content` / `partial` / `deferred` (upload policy는 문서에서 분리).
 
 ## 8. 로그
 

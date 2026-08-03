@@ -17,6 +17,7 @@ from kakao_import.db import (
     finish_batch,
     init_schema,
     insert_parse_error,
+    prune_missing_photo_files,
     rebuild_exact_groups,
     replace_messages,
     start_batch,
@@ -311,10 +312,12 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
 
 
 def cmd_hash(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """SHA-256 + exact 그룹."""
+    """SHA-256 + exact 그룹. [변경사유]: Phase 3.5 — hash 전 file_missing prune."""
     root = root or settings.export_root
     assert root is not None
     with connect(settings.db_path) as conn:
+        # [변경사유]: 삭제된 로컬 파일이 exact 그룹에 남아 fail=N 누적되던 문제
+        pruned = prune_missing_photo_files(conn, root)
         rows = conn.execute("SELECT id, rel_path, sha256 FROM photo_file").fetchall()
         updated = 0
         for r in rows:
@@ -329,7 +332,12 @@ def cmd_hash(settings: Settings, root: Path | None = None) -> dict[str, Any]:
             log.info("hash photo_id=%s sha=%s", r["id"], digest[:12])
         exact = rebuild_exact_groups(conn)
         conn.commit()
-        return {"hashed": len(rows), "updated": updated, **exact}
+        return {
+            "hashed": len(rows),
+            "updated": updated,
+            "pruned_missing": pruned.get("pruned", 0),
+            **exact,
+        }
 
 
 def _ensure_phase2(conn) -> None:

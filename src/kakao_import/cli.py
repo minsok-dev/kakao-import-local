@@ -254,6 +254,24 @@ def export_payload_cmd(
     default=None,
     help="매니페스트 출력 경로",
 )
+@click.option(
+    "--allow-empty-caption/--no-allow-empty-caption",
+    default=True,
+    show_default=True,
+    help="이미지만(인접 메시지 없음) 업로드 허용. 기본 허용(운영 필수)",
+)
+@click.option(
+    "--require-adjacent",
+    is_flag=True,
+    default=False,
+    help="엄격 모드: empty adjacent가 있으면 배치 전체 차단",
+)
+@click.option(
+    "--result-json",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="상세 결과 UTF-8 JSON (기본 data/upload-result.json)",
+)
 @click.pass_context
 def upload_cmd(
     ctx: click.Context,
@@ -262,8 +280,11 @@ def upload_cmd(
     limit: int | None,
     endpoint: str | None,
     output: Path | None,
+    allow_empty_caption: bool,
+    require_adjacent: bool,
+    result_json: Path | None,
 ) -> None:
-    """Phase3: Import 업로드 (기본 dry-run). 쿠키 파일 저장 금지."""
+    """Phase3: Import 업로드 (기본 dry-run). 이미지만 있는 건도 기본 업로드."""
     settings = ctx.obj["settings"]
     summary = upload_mod.cmd_upload(
         settings,
@@ -272,8 +293,16 @@ def upload_cmd(
         limit=limit,
         endpoint=endpoint,
         out_manifest=output,
+        allow_empty_caption=allow_empty_caption,
+        require_adjacent=require_adjacent,
+        result_json=result_json,
     )
-    click.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+    # [변경사유]: Phase 3.5 P4 — 콘솔은 요약만 (전체 JSON+emoji로 cp949 깨짐 방지)
+    upload_mod.echo_summary_safe(summary)
+    if summary.get("result_json"):
+        click.echo(f"result_json={summary['result_json']}")
+    if summary.get("error"):
+        raise click.ClickException(str(summary["error"]))
 
 
 if __name__ == "__main__":

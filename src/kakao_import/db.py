@@ -181,6 +181,29 @@ def update_photo_sha(conn: sqlite3.Connection, photo_id: int, sha256: str) -> No
     conn.execute("UPDATE photo_file SET sha256 = ? WHERE id = ?", (sha256, photo_id))
 
 
+def prune_missing_photo_files(
+    conn: sqlite3.Connection, root: Path
+) -> dict[str, int]:
+    """
+    디스크에 없는 photo_file 행 삭제 후 exact 그룹 재구성.
+    [변경사유]: Phase 3.5 P3 — file_missing 잔존으로 fail 누적 방지 (마이그 없음)
+    """
+    rows = conn.execute("SELECT id, rel_path FROM photo_file").fetchall()
+    pruned = 0
+    for r in rows:
+        rel = str(r["rel_path"] or "").replace("\\", "/")
+        path = root / rel
+        if path.is_file():
+            continue
+        log.warning("prune file_missing photo_id=%s rel=%s", r["id"], rel)
+        conn.execute("DELETE FROM photo_file WHERE id = ?", (int(r["id"]),))
+        pruned += 1
+    exact: dict[str, int] = {"exact_groups": 0, "excluded_from_upload": 0}
+    if pruned > 0:
+        exact = rebuild_exact_groups(conn)
+    return {"pruned": pruned, **exact}
+
+
 def clear_batch_match_data(conn: sqlite3.Connection, batch_id: int) -> None:
     """배치 매칭 결과 삭제 후 재기록용."""
     conn.execute("DELETE FROM group_text WHERE group_id IN (SELECT id FROM image_group WHERE batch_id=?)", (batch_id,))

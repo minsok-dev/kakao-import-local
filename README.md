@@ -13,22 +13,23 @@
 | 텍스트 | balanced merge (Phase 2) | OCR + 카카오 메시지 → GPT |
 | 원본 | **삭제·수정 금지** | 자산 overwrite 금지 |
 
-## Phase (v1.2)
+## Phase (v1.3)
 
 | Phase | 우선 | 내용 | 상태 |
 |-------|-----:|------|------|
-| **0** | 지금 | 계약·golden·개인정보 | 레이아웃·시각매칭·1건 golden 확정 |
-| **0.5** | 지금 | signature 조사만 | 대기 |
-| **1** | 최우선 | parser + **시각 matcher** + 이력 + SHA + 리포트 | **구현 완료** (ESENCIA golden 통과) |
-| **1.5** | 이후 | watcher | 예정 |
-| **2** | 다음 | 텍스트 merge | **구현 완료** (safe/balanced/auto) |
-| **3** | 다음 | Import·exact·OCR/GPT | **3a·3b** `automated tests passed / staging manual verification pending` (함께 검증) · UI `/admin_w/ingest/import` · [phase3-import.md](./phase3-import.md) |
-| **4** | 이후 | similar 그룹 UI | 예정 |
-| **5** | 마지막 | 제한 자동 승인 | 예정 |
+| **0** | — | 계약·golden·개인정보 | ✅ |
+| **0.5** | 낮음 | signature 조사만 | Phase 4 직전 |
+| **1** | — | parser + **시각 matcher** + 이력 + SHA + 리포트 | ✅ (ESENCIA golden) |
+| **1.5** | 보류 | watcher | **3.5·E2E 후** |
+| **2** | — | 텍스트 merge | ✅ |
+| **3** | — | Import·exact·OCR/GPT | ✅ 기능 (운영 이슈→3.5) |
+| **3.5** | **지금** | 운영 안정화 (caption·gate·file_missing·UTF-8) | **최우선** — [docs/phase3-ops-stabilization.md](./docs/phase3-ops-stabilization.md) |
+| **4** | 이후 | similar 그룹 UI | **3.5 전 착수 금지** |
+| **5** | 마지막 | 제한 자동 승인 | 이후 |
 
 Phase 1 완료 = ESENCIA golden(`…005030533` / `…005034512` ↔ `오전 12:50` 사진 2줄) 자동 통과 포함.
 
-상세: [docs/development-plan.md](docs/development-plan.md) **v1.2** · Phase3: [docs/phase3-import.md](docs/phase3-import.md)
+상세: [docs/development-plan.md](docs/development-plan.md) **v1.3** · Phase3: [docs/phase3-import.md](docs/phase3-import.md) · 안정화: [docs/phase3-ops-stabilization.md](docs/phase3-ops-stabilization.md)
 
 ## 요구 사항
 

@@ -107,6 +107,8 @@ crawl `skipped_dup` 정책을 카카오 Import에 그대로 적용하지 않음.
 
 ## 7. Similar 그룹 (Phase 4, 계약 예고)
 
+<!-- [변경사유]: Phase 4는 Phase 3.5 운영 안정화·E2E 이후. 상세: phase3-ops-stabilization.md -->
+
 [similar-group-decisions.md](./similar-group-decisions.md)
 
 ## 8. 로그

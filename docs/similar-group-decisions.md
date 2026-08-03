@@ -1,5 +1,10 @@
 # Similar 그룹 결정 모델 (Phase 4, 계약은 Phase 0에 예고)
 
+<!-- [변경사유]: Phase 4 착수 조건 = Phase 3.5 운영 안정화·E2E 완료. 서버 Similar hold가 본경로 -->
+
+> **착수 조건:** [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) 완료 전 Phase 4를 시작하지 않는다.  
+> 서버 Similar hold가 중복 방지 본경로이며, 로컬 similar UI는 운영 보조다.
+
 <!-- [변경사유]: 2장 이상 합침/분리/재결정·업로드 단위 — 리뷰에서 누락된 UX를 문서화 -->
 
 ## 목적

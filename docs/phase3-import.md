@@ -1,14 +1,19 @@
 # Phase 3 — 카카오 Import → 공통 exact / OCR 입구
 
-<!-- [변경사유]: 2026-07-25 — exact 전건 hold 폐기. SNS 병합·auto_migrate·F hold. 프론트 정책 문서 기준 -->
+<!-- [변경사유]: 2026-08-03 — Phase 3.5 운영 안정화 링크. caption replay는 3.5에서 처리 -->
 
 | 항목 | 내용 |
 |------|------|
-| 상태 | **정책 확정 · 프론트 코드는 교체 예정** |
-| 기준일 | 2026-07-25 |
+| 상태 | **기능 구현 ✅ · 운영 안정화는 Phase 3.5** |
+| 기준일 | 2026-08-03 |
 | 확정 정책 | `frontend/docs/image-exact-sns-merge-policy.md` |
 | 개발 계획 | `frontend/docs/image-exact-sns-merge-dev-plan.md` |
+| **운영 안정화** | [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) (**지금 최우선**) |
 | 이전(폐기) | exact → 전부 OCR `exact_hold` (`image-dup-review-phase1.md`) |
+
+> **다음 작업은 Phase 3 기능 추가가 아니라 Phase 3.5(P1~P4)다.**  
+> 멱등 replay caption 고착 · empty adjacent gate · file_missing · UTF-8.  
+> Phase 4 로컬 similar / watcher / 자동 승인은 3.5·E2E 이후.
 
 ## 목표 상태 흐름
 

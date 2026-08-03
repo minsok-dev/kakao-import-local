@@ -1,16 +1,17 @@
 # 카카오톡 로컬 수집 · Import — 개발 계획서
 
-<!-- [변경사유]: v1.2 — 실측 입력 레이아웃·파일명 시각 매칭·golden 반영, Phase 정의 명확화 -->
+<!-- [변경사유]: v1.3 — Phase 3.5 운영 안정화(최우선). caption replace-if-richer·gate·file_missing·UTF-8. Phase 4 보류 -->
 
 | 항목 | 내용 |
 |------|------|
-| 문서 버전 | **1.2** |
-| 기준일 | 2026-07-24 |
+| 문서 버전 | **1.3** |
+| 기준일 | 2026-08-03 |
 | 레포 | `kakao-import-local` (로컬) · `frontend` / `backend` (Phase 3~) |
 | 입력 샘플 | `input/raw/chats/` + `input/raw/photos/` (gitignore) |
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
+| **현재 최우선** | **[Phase 3.5 운영 안정화](./phase3-ops-stabilization.md)** (Phase 4 전) |
 
-관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md)
+관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md)
 
 ---
 
@@ -102,7 +103,8 @@ input/raw/photos + input/raw/chats
   local history (멱등)
   SHA exact (로컬·이력)
   (Phase2) text merge / modes
-  (Phase4) similar groups + 결정 UI
+  (Phase3.5) caption replay · empty gate · file_missing · UTF-8  ← 지금
+  (Phase4) similar groups + 결정 UI  ← 안정화·E2E 후
   report: matched | ambiguous | unmatched
         │
         ▼  Phase 3
@@ -124,24 +126,31 @@ ImportItem → matched/merged message 저장
 
 ## 4. Phase 구조 (확정)
 
-| Phase | 우선 | 내용 | 완료의 뜻 |
-|-------|-----:|------|-----------|
-| **0** | 지금 | 계약·golden·개인정보·SQLite 초안·payload | 규칙·정답 문서 합의 |
-| **0.5** | 지금 | signature Python 사용 **조사만** | 연동 방식 1택 고정 |
-| **1** | **최우선** | parser + **시각 matcher** + 이력 + SHA + 리포트 | **위 golden 자동 통과** |
-| **1.5** | 이후 | watcher / 자동 실행 | Phase 1 통과 후 |
-| **2** | 다음 | 텍스트 정규화·merge·safe/balanced/auto | 충돌·되돌리기 보존 |
-| **3** | 다음 | Import·인증·서버 exact → **SNS 병합 공통 서비스** (exact 전건 hold 폐기 · F만 hold) | 프론트 정책 문서·스테이징 E2E |
-| **4** | 이후 | similar + **그룹 합침/분리 UI** | review only |
+| Phase | 우선 | 내용 | 완료의 뜻 / 상태 |
+|-------|-----:|------|------------------|
+| **0** | — | 계약·golden·개인정보·SQLite 초안·payload | ✅ 규칙·정답 문서 합의 |
+| **0.5** | 낮음 | signature Python 사용 **조사만** | 연동 방식 1택 (Phase 4 직전 재확인) |
+| **1** | — | parser + **시각 matcher** + 이력 + SHA + 리포트 | ✅ golden 자동 통과 |
+| **1.5** | 보류 | watcher / 자동 실행 | **3.5 안정화·E2E 후** (잘못된 자동 유입 방지) |
+| **2** | — | 텍스트 정규화·merge·safe/balanced/auto | ✅ 구현 완료 |
+| **3** | — | Import·인증·서버 exact → **SNS 병합 공통 서비스** | ✅ 기능 구현 (스테이징 수동 검증·운영 이슈는 3.5) |
+| **3.5** | **지금 최우선** | **운영 안정화** — caption replay · matched_messages gate · file_missing · UTF-8 | 데이터 고착·오염 해소 + E2E |
+| **4** | 이후 | similar + **그룹 합침/분리 UI** | review only · **3.5 완료 전 착수 금지** |
 | **5** | 마지막 | 제한 자동 승인 | 화이트리스트만 |
 
 ### 우선순위 한 줄
 
 ```text
-golden·계약 → signature 조사
-→ parser/matcher(시각) → SQLite 멱등 → SHA
-→ 텍스트 merge → Import/OCR/GPT → similar UI → 제한 자동화
+[기능 완료] Phase 0~3
+→ [지금] Phase 3.5 운영 안정화 + E2E
+→ (병렬 가능) Legacy 백필 / Similar enforce 점검
+→ Phase 4 로컬 similar UI
+→ Phase 1.5 watcher · Phase 5 제한 자동화
 ```
+
+**판단:** 카카오는 “기능 개발”이 아니라 **운영 안정화** 단계다.  
+새 큰 기능(Phase 4+)보다 **데이터 품질·반복 실행 안정성**이 우선이다.  
+상세: [phase3-ops-stabilization.md](./phase3-ops-stabilization.md)
 
 ---
 
@@ -200,7 +209,7 @@ chats/*.txt 파싱
 
 **넣지 않음:** similar, Import 업로드, 완성형 GUI, watcher.
 
-**현재 코드:** 폴더 스캔·SHA stub만 → Phase 1 **미완료**.
+**상태:** ✅ **구현 완료** (ESENCIA golden 통과).
 
 **SQLite가 보장할 것**
 
@@ -214,7 +223,10 @@ chats/*.txt 파싱
 
 ### Phase 1.5 — Watcher · 자동 실행
 
-폴더 감시, 안정화 대기, (선택) 작업 스케줄러. Phase 1 golden 이후.
+폴더 감시, 안정화 대기, (선택) 작업 스케줄러.
+
+**보류:** Phase **3.5** 안정화·E2E 통과 전 착수하지 않는다.  
+자동화하면 empty adjacent·매칭 실패 데이터가 그대로 유입될 수 있다.
 
 ---
 
@@ -248,7 +260,10 @@ similar / unmatched            → review (similar=Phase4, unmatched=Phase1 matc
 
 **상태**:  
 - 3a 접수·안전 ✅ — `automated tests passed / staging manual verification pending`  
-- 3b 승인→OCR + 최소 UI ✅ — [phase3-import.md](./phase3-import.md) (이후 **exact SNS 병합**으로 교체 예정 · `frontend/docs/image-exact-sns-merge-policy.md`)
+- 3b 승인→OCR + 최소 UI ✅ — [phase3-import.md](./phase3-import.md)  
+- exact SNS 병합 정책·코드: `frontend/docs/image-exact-sns-merge-policy.md` (구조 ✅)  
+- **운영 이슈(caption 고착·empty gate 등) → Phase 3.5**
+
 **미포함**: similar 차단 본구현, watcher, 자동 승인, 카카오→raw 통합, 카카오 자동 수집
 
 **인증 (선결정)**  
@@ -288,7 +303,7 @@ ImportItem
 
 - **contentIdx SSOT**: `tbl_ocrcontent.migrated_content_idx`
 - **Import `response_json.content_idx`**: 상세 조회 시 lazy sync 캐시 (승인 직후 null)
-- **auto_migrate**: 확정 정책상 카카오 **신규**는 크롤과 같이 자동 이관 정합 (`frontend/docs/image-exact-sns-merge-policy.md`). 현재 코드 `0`이면 개발 계획 P4에서 변경.
+- **auto_migrate**: 확정 정책상 카카오 **신규**는 크롤과 같이 자동 이관 정합 (`frontend/docs/image-exact-sns-merge-policy.md`).
 
 ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
@@ -296,13 +311,34 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
 ---
 
+### Phase 3.5 — 운영 안정화 (**지금 최우선**)
+
+상세 전문: **[phase3-ops-stabilization.md](./phase3-ops-stabilization.md)**
+
+기능 추가가 아니라 **데이터 품질·멱등 replay 안정성**이다.
+
+| P | 내용 | 요지 |
+|---|------|------|
+| **P1** | caption replay | 문제는 overwrite가 아니라 **고착**. same-source는 **replace-if-richer**(append 금지). placeholder→fill. 빈 incoming→유지. 이종 SNS만 `mergeSnsCaptionAppend` |
+| **P2** | matched_messages gate | dry-run 허용. 실전송 기본 경고/차단. `--allow-empty-caption` 예외 |
+| **P3** | file_missing | 존재 확인·스킵·prune/제외. DB migration 없음 |
+| **P4** | UTF-8 CLI | 콘솔 요약만 + UTF-8 결과 파일 |
+
+**완료 기준:** P1~P4 구현 + [E2E Case A~F](./phase3-ops-stabilization.md#5-e2e-검증-안정화-후) 통과.  
+**하지 않음:** Phase 4 / watcher / 자동 승인 / Exact·similar happy path 변경.
+
+---
+
 ### Phase 4 — Similar · 그룹 결정 UI
+
+**착수 조건:** Phase **3.5** + E2E 완료 후.
 
 - Phase 0.5에서 고른 방식으로 signature  
 - **N≥2 그룹**: `merge_all` / `separate_all` / `partial` / `deferred`  
 - 재결정: `re_merge` / `split` (전송 전=로컬 decision)  
 - **시각 리뷰 UI 필수** (Python 로컬 웹 또는 관리자 Next — Phase 4 착수 시 선택)  
 - similar 자동 통합 없음  
+- 서버 Similar hold가 이미 있으므로, 로컬 similar는 **운영 보조 UI** 성격 (중복 방지 본경로 아님)
 
 → [similar-group-decisions.md](./similar-group-decisions.md)
 
@@ -310,15 +346,19 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
 ### Phase 5 — 제한 자동 승인
 
-검증된 규칙만; 감사 로그·롤백; similar auto-merge / overwrite 금지 유지.
+검증된 규칙만; 감사 로그·롤백; similar auto-merge / overwrite 금지 유지.  
+**3.5·4 이후.** 목표가 “자동 등록”이 되기 전에 **데이터 신뢰성**이 먼저다.
 
 ---
 
-## 6. 나중에 해도 되는 것 (1~3을 막지 않음)
+## 6. 나중에 해도 되는 것 (3.5를 막지 않음)
 
 Electron/PySide 완성형 GUI, 트레이, 시작 시 자동 실행, 멀티 PC 동기화,  
 service token 완전 자동 전송, similar 자동 통합, CLIP,  
-기존 콘텐츠 자동 보완, 대표 이미지 자동 교체, legacy 대량 백필, 운영 대시보드.
+기존 콘텐츠 자동 보완, 대표 이미지 자동 교체, legacy 대량 백필, 운영 대시보드,  
+카카오→`tbl_ingest_raw` 통합.
+
+Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2E 후 **병렬 가능**.
 
 ---
 
@@ -328,20 +368,19 @@ service token 완전 자동 전송, similar 자동 통합, CLIP,
 |--|--------------------|----------|---------|
 | 0~2, 1.5 | ✅ | — | 0.5만 패키지 |
 | 3 | upload CLI | ✅ Import/exact/GPT 연결 | OCR 입력 |
+| **3.5** | gate · file_missing · UTF-8 | ✅ **caption replay merge** | — |
 | 4 | 로컬 리뷰 UI(선택) | 관리자 리뷰 UI | signature |
 
 ---
 
 ## 8. 즉시 다음 액션
 
-1. **Phase 0.5** signature 설치·golden 1회 → 방식 고정  
-2. **Phase 1**  
-   - `parser` (일자·메시지·`사진`)  
-   - `photo_index` (`KakaoTalk_` 시각 + SHA)  
-   - `matcher` → **ESENCIA golden 테스트**  
-   - 멱등 DDL + report  
-3. golden 추가 샘플 2~3건 (사진 N장, 날짜 경계, ambiguous)  
-4. Phase 2 이후는 1 통과 후  
+1. **Phase 3.5 P1~P4** 구현 ([phase3-ops-stabilization.md](./phase3-ops-stabilization.md))  
+   - 서버: 멱등 replay 시 `mergeKakaoCaption` / replace-if-richer  
+   - 로컬: empty adjacent gate · file_missing prune · UTF-8 요약  
+2. **E2E** Case A~F (신규 / replay 개선 / Exact append / empty gate / file_missing / no-op)  
+3. (이후·병렬) Legacy 백필 · Similar enforce 운영 점검  
+4. Phase **4** — 3.5 완료 전 착수하지 않음  
 
 ---
 
@@ -351,4 +390,5 @@ service token 완전 자동 전송, similar 자동 통합, CLIP,
 |------|------|
 | 1.0 | 초기 Phase 0~5 |
 | 1.1 | parser 우선·이력·개인정보·0.5·서버 exact/GPT·similar 그룹 |
-| **1.2** | **공용 photos+방별 chats 확정**, **파일명 시각 매칭 주 경로**, ESENCIA golden, Phase 1 완료=해당 테스트 통과, 계획서 재정리 |
+| 1.2 | **공용 photos+방별 chats 확정**, **파일명 시각 매칭 주 경로**, ESENCIA golden, Phase 1 완료=해당 테스트 통과, 계획서 재정리 |
+| **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착(덮어쓰기 아님)·same-source replace-if-richer. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |

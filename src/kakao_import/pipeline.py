@@ -644,3 +644,112 @@ def cmd_run(settings: Settings, root: Path | None = None) -> dict[str, Any]:
     out["merge"] = cmd_merge(settings)
     out["report"] = build_report(settings, root)
     return out
+
+
+# [변경사유]: Phase 4.0 — similar 탐지 (upload 큐 미변경)
+def cmd_similar_detect(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    max_distance: int | None = None,
+    limit: int | None = None,
+    force_resign: bool = False,
+) -> dict[str, Any]:
+    """signature 계산 + similar 그룹 재구성. decision 기본 deferred."""
+    from kakao_import.similar_detect import (
+        ensure_similar_schema,
+        rebuild_similar_groups,
+        try_import_sign_fn,
+        upsert_photo_signatures,
+    )
+
+    root = root or settings.export_root
+    assert root is not None
+    dist = (
+        max_distance
+        if max_distance is not None
+        else settings.similar_max_distance
+    )
+    sign_fn = try_import_sign_fn()
+    if sign_fn is None:
+        return {
+            "ok": False,
+            "error": "SIGNATURE_PACKAGE_MISSING",
+            "hint": "pip install Pillow && pip install -e ../backend/packages/danceinfo_image_signature",
+        }
+    with connect(settings.db_path) as conn:
+        ensure_similar_schema(conn)
+        sign_stats = upsert_photo_signatures(
+            conn, root, sign_fn=sign_fn, limit=limit, force=force_resign
+        )
+        group_stats = rebuild_similar_groups(conn, max_distance=dist)
+        conn.commit()
+        log.info(
+            "similar-detect signed=%s groups=%s members=%s dist=%s",
+            sign_stats.get("signed"),
+            group_stats.get("groups"),
+            group_stats.get("members"),
+            dist,
+        )
+        return {"ok": True, "sign": sign_stats, "groups": group_stats}
+
+
+def cmd_similar_list(settings: Settings) -> list[dict[str, Any]]:
+    """similar 그룹 목록 (decision + 유도 upload_policy 표시만)."""
+    from kakao_import.similar_detect import ensure_similar_schema, list_similar_groups
+
+    with connect(settings.db_path) as conn:
+        ensure_similar_schema(conn)
+        return list_similar_groups(conn)
+
+
+def cmd_similar_decide(
+    settings: Settings,
+    *,
+    group_id: int,
+    decision: str,
+    representative_photo_id: int | None = None,
+    subgroups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """content decision만 저장 - upload/삭제/자동병합 없음. partial 시 subgroups."""
+    from kakao_import.similar_detect import (
+        ensure_similar_schema,
+        set_similar_group_decision,
+    )
+
+    with connect(settings.db_path) as conn:
+        ensure_similar_schema(conn)
+        try:
+            out = set_similar_group_decision(
+                conn,
+                group_id=group_id,
+                decision=decision,
+                representative_photo_id=representative_photo_id,
+                subgroups=subgroups,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        conn.commit()
+        out["ok"] = True
+        return out
+
+
+# [변경사유]: Phase 4.1 — 로컬 썸네일 리뷰 UI (decision만)
+def cmd_similar_review(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = True,
+) -> None:
+    """브라우저에서 그룹 썸네일 확인 + decision 저장. upload 미변경."""
+    from kakao_import.similar_review import run_review_server
+
+    run_review_server(
+        settings,
+        root=root or settings.export_root,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+    )

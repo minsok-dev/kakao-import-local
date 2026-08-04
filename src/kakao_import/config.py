@@ -27,6 +27,8 @@ class Settings:
     different_sender_grace_seconds: int
     different_sender_max_chars: int
     merge_mode: MergeMode
+    # [변경사유]: Phase 4.0 — 서버 MEDIA_SIMILAR_MAX_DISTANCE 기본(10)과 정렬
+    similar_max_distance: int = 10
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -43,6 +45,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
     mode_raw = (os.getenv("MERGE_MODE") or "balanced").strip().lower()
     if mode_raw not in ("safe", "balanced", "auto"):
         mode_raw = "balanced"
+    similar_max = int(os.getenv("SIMILAR_MAX_DISTANCE") or "10")
+    if similar_max < 0:
+        similar_max = 10
     return Settings(
         export_root=export_root,
         db_path=db_path,
@@ -54,4 +59,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         ),
         different_sender_max_chars=int(os.getenv("DIFFERENT_SENDER_MAX_CHARS") or "80"),
         merge_mode=mode_raw,  # type: ignore[arg-type]
+        similar_max_distance=similar_max,
     )

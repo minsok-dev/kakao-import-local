@@ -48,6 +48,35 @@ similar_group G1 = { A, B, C }
 전송 전 재결정: `same_content` ↔ `different_content` (또는 `partial` 조정).  
 원본 파일·로컬 멤버십은 유지한다.
 
+### partial 서브그룹 (Phase 4.1)
+
+<!-- [변경사유]: 혼합 그룹(템플릿 유사·콘텐츠 일부만 동일) 처리 절차·스키마 명시 -->
+
+한 similar 그룹 안에 **같은 콘텐츠 + 다른 콘텐츠**가 섞인 경우:
+
+```text
+예) G14 = {228, 229, 231, 232, 233}
+  서브그룹 p1: {229, 233}     ← same → 대표 1장
+  단독:        {228},{231},{232} ← 각각 업로드 후보
+```
+
+| 항목 | 내용 |
+|------|------|
+| DB | `similar_image_member.subgroup_key` / `is_subgroup_rep` (`005_phase41_partial_subgroup.sql`) |
+| 규칙 | 모든 멤버가 정확히 1개 서브그룹에 속함. **size≥2 묶음 ≥1개** 필수 (아니면 `different_content`) |
+| 단독 | `subgroup_key = solo-{photo_id}` |
+| UI | `similar-review` → **부분** → 멤버 **선택** → **선택 묶기** → **부분 저장** |
+| upload (4.2+) | 묶음마다 대표 1장 + 단독은 각자 (`upload_partial`) |
+
+**지금(4.1):** decision·서브그룹만 저장. 업로드 큐·파일 삭제·자동 병합 없음.  
+**주의:** `similar-detect` 재실행 시 그룹이 재구성되면 decision/서브그룹은 초기화될 수 있음(재리뷰).
+
+실무 가이드:
+
+1. 혼합이면 **부분**으로 묶기 (권장)  
+2. 서브그룹 UI를 쓰기 전이거나 애매하면 **다른 콘텐츠**(전원 업로드)로 보수적 처리  
+3. 통째 **같은 콘텐츠**는 다른 반 포스터 유실 위험이 있어 혼합 그룹에 쓰지 않음  
+
 ### Deprecated alias (문서·구초안만)
 
 | 구 용어 | 현재 |
@@ -85,12 +114,13 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 | Import **전** | 로컬 DB decision·upload policy 매핑 변경으로 충분 |
 | Import **후** | 서버 ImportItem / OCR / asset 정책 (force-link·리뷰 등) |
 
-## UI 필수 (Phase 4 본구현 · 3.5+E2E 이후)
+## UI 필수 (Phase 4)
 
-- 그룹 목록 → 멤버 썸네일 N장 나란히  
-- 액션: 같은 콘텐츠 / 다른 콘텐츠 / 부분 / 보류  
+- 그룹 목록 → 멤버 썸네일 N장 나란히 (+ 클릭 시 큰 이미지)  
+- 액션: 같은 콘텐츠 / 다른 콘텐츠 / **부분(서브그룹)** / 보류  
 - 같은 그룹에 대해 decision 재변경 가능 (멱등)  
-- upload 건수·대표·excluded 멤버가 decision과 일치하는지 표시
+- **4.1:** decision·서브그룹 저장까지 (로컬 `similar-review`)  
+- **4.2+:** upload 건수·대표·excluded 멤버가 decision과 일치하는지 표시·적용  
 
 ## Phase 매핑
 
@@ -99,9 +129,14 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 | Phase 0 | 본 문서·payload에 `group_id`·`decision` 필드 예고 | — |
 | Phase 1 | 그룹 테이블 stub 가능, similar 계산 안 함 | — |
 | **Phase 4.0** | signature 공통 + 그룹 **탐지** + 로그/목록 + (선택) decision 저장. **upload 동작 변경 없음** | **3.5와 병렬 가능** |
-| **Phase 4.2+** | upload policy 적용 + 리뷰 UI + (이후) caption 정책 | **3.5 + E2E 이후** |
+| **Phase 4.1** | 로컬 **썸네일 리뷰 UI** + **partial 서브그룹** — decision만 저장, **upload 미적용** | **3.5와 병렬 가능** |
+| **Phase 4.2+** | upload policy 적용 + (필요 시) UI 고도화 + caption 정책 | **3.5 + E2E 이후** |
 
 ## 상태
 
 계약 초안 ✅ (용어: `same_content` / `different_content`, decision≠upload policy).  
-구현 전 Phase 4 본구현 착수 시 와이어프레임 추가.
+<!-- [변경사유]: Phase 4.1 partial 서브그룹 저장·UI -->
+**Phase 4.0 (탐지-only):** `similar-detect` / `similar-list` / `similar-decide` + SQLite `004` ✅  
+**Phase 4.1 (리뷰 UI + partial):** `kakao-import similar-review` — 썸네일·라이트박스·부분 묶기 + `005` ✅  
+decision/서브그룹 저장은 upload 큐·파일 삭제·자동 병합을 수행하지 않음.  
+Phase 4.2+ (upload policy로 큐 필터)는 3.5 E2E 이후.

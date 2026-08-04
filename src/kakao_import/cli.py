@@ -305,5 +305,131 @@ def upload_cmd(
         raise click.ClickException(str(summary["error"]))
 
 
+# [변경사유]: Phase 4.0 — similar 탐지 CLI (upload 큐 미변경, decision≠삭제/자동병합)
+def _settings_with_db(ctx: click.Context, db: Path | None):
+    """ctx settings + 선택적 --db 오버라이드."""
+    from dataclasses import replace
+
+    settings = ctx.obj["settings"]
+    if db is None:
+        return settings
+    return replace(settings, db_path=Path(db))
+
+
+@main.command("similar-detect")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option(
+    "--max-distance",
+    type=int,
+    default=None,
+    help="min(dHash,pHash) 상한 (기본 SIMILAR_MAX_DISTANCE=10)",
+)
+@click.option("--limit", type=int, default=None, help="서명 계산 상한 (테스트용)")
+@click.option("--force-resign", is_flag=True, help="기존 signature 재계산")
+@click.pass_context
+def similar_detect_cmd(
+    ctx: click.Context,
+    db: Path | None,
+    root: Path | None,
+    max_distance: int | None,
+    limit: int | None,
+    force_resign: bool,
+) -> None:
+    """사진 signature 계산 + similar 그룹 탐지 (detect-only)."""
+    settings = _settings_with_db(ctx, db)
+    out = pipe.cmd_similar_detect(
+        settings,
+        root,
+        max_distance=max_distance,
+        limit=limit,
+        force_resign=force_resign,
+    )
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "similar-detect failed"))
+
+
+@main.command("similar-list")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.pass_context
+def similar_list_cmd(ctx: click.Context, db: Path | None) -> None:
+    """similar 그룹 목록 (decision + 유도 upload_policy 표시만)."""
+    settings = _settings_with_db(ctx, db)
+    rows = pipe.cmd_similar_list(settings)
+    click.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+@main.command("similar-decide")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option("--group-id", type=int, required=True)
+@click.option(
+    "--decision",
+    type=click.Choice(
+        ["same_content", "different_content", "partial", "deferred"]
+    ),
+    required=True,
+)
+@click.option(
+    "--representative-photo-id",
+    type=int,
+    default=None,
+    help="same_content 시 대표 photo_id (선택)",
+)
+@click.pass_context
+def similar_decide_cmd(
+    ctx: click.Context,
+    db: Path | None,
+    group_id: int,
+    decision: str,
+    representative_photo_id: int | None,
+) -> None:
+    """content 관계 decision만 저장 - upload/삭제/자동병합 없음."""
+    settings = _settings_with_db(ctx, db)
+    out = pipe.cmd_similar_decide(
+        settings,
+        group_id=group_id,
+        decision=decision,
+        representative_photo_id=representative_photo_id,
+    )
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "similar-decide failed"))
+
+
+# [변경사유]: Phase 4.1 — 로컬 웹 리뷰 UI (썸네일 + decision, upload 미적용)
+@main.command("similar-review")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=8765, show_default=True)
+@click.option("--no-browser", is_flag=True, help="브라우저 자동 실행 안 함")
+@click.pass_context
+def similar_review_cmd(
+    ctx: click.Context,
+    db: Path | None,
+    root: Path | None,
+    host: str,
+    port: int,
+    no_browser: bool,
+) -> None:
+    """썸네일 리뷰 UI - content decision만 저장 (upload/삭제/자동병합 없음)."""
+    settings = _settings_with_db(ctx, db)
+    target = root or settings.export_root
+    if target is None:
+        raise click.UsageError("--root 또는 KAKAO_EXPORT_ROOT 필요")
+    click.echo(
+        "Similar review UI (decision only). "
+        f"Open http://{host}:{port}/  - Ctrl+C to stop."
+    )
+    pipe.cmd_similar_review(
+        settings,
+        Path(target),
+        host=host,
+        port=port,
+        open_browser=not no_browser,
+    )
+
+
 if __name__ == "__main__":
     main()

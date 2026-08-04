@@ -104,11 +104,35 @@ def test_prune_missing(tmp_path: Path) -> None:
             VALUES ('photos/ok.jpg', 'ok.jpg', 1)
             """
         )
+        miss_id = conn.execute(
+            """
+            INSERT INTO photo_file (rel_path, file_name, name_parse_ok, sha256)
+            VALUES ('photos/missing.jpg', 'missing.jpg', 1, 'deadbeef')
+            """
+        ).lastrowid
+        # [변경사유]: exact 대표 FK가 prune IntegrityError 유발하던 재현
+        eg = conn.execute(
+            """
+            INSERT INTO exact_sha_group (sha256, representative_photo_id, member_count)
+            VALUES ('deadbeef', ?, 1)
+            """,
+            (miss_id,),
+        ).lastrowid
         conn.execute(
             """
-            INSERT INTO photo_file (rel_path, file_name, name_parse_ok)
-            VALUES ('photos/missing.jpg', 'missing.jpg', 1)
+            INSERT INTO exact_sha_member
+              (group_id, photo_id, is_representative, excluded_from_upload)
+            VALUES (?, ?, 1, 0)
+            """,
+            (eg, miss_id),
+        )
+        conn.execute(
             """
+            INSERT INTO photo_signature
+              (photo_id, algo_version, dhash_hex, phash_hex, source_sha256)
+            VALUES (?, 't', '00', '00', 'deadbeef')
+            """,
+            (miss_id,),
         )
         conn.commit()
         r = prune_missing_photo_files(conn, root)
@@ -116,3 +140,10 @@ def test_prune_missing(tmp_path: Path) -> None:
         assert r["pruned"] == 1
         left = conn.execute("SELECT COUNT(*) c FROM photo_file").fetchone()["c"]
         assert left == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) c FROM exact_sha_member WHERE photo_id = ?",
+                (miss_id,),
+            ).fetchone()["c"]
+            == 0
+        )

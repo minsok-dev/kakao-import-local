@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -17,10 +18,52 @@ from kakao_import.logging_util import get_logger
 from kakao_import.payload import (
     build_batch_manifest,
     exceeds_ingress_limit,
+    is_attachment_marker_text,
     write_manifest,
 )
 
 log = get_logger(__name__)
+
+# [변경사유]: 실전송 배치가 similar 판정·OCR job 을 연속 유발 → 서비스 부하 완화용 기본 유휴
+#   요청 처리 시간(1~20s)과 별도로, 응답 후 대기. ocr_queued 는 워커 큐잉이 이어지므로 추가 대기.
+DEFAULT_UPLOAD_SLEEP_SEC = 5.0
+DEFAULT_UPLOAD_OCR_EXTRA_SEC = 5.0
+
+
+def resolve_upload_pace_sec(
+    *,
+    sleep_sec: float | None = None,
+    ocr_extra_sec: float | None = None,
+) -> tuple[float, float]:
+    """업로드 간격(초). env: KAKAO_IMPORT_UPLOAD_SLEEP_SEC / KAKAO_IMPORT_UPLOAD_OCR_EXTRA_SEC."""
+    if sleep_sec is None:
+        raw = (os.getenv("KAKAO_IMPORT_UPLOAD_SLEEP_SEC") or "").strip()
+        sleep_sec = float(raw) if raw else DEFAULT_UPLOAD_SLEEP_SEC
+    if ocr_extra_sec is None:
+        raw_extra = (os.getenv("KAKAO_IMPORT_UPLOAD_OCR_EXTRA_SEC") or "").strip()
+        ocr_extra_sec = (
+            float(raw_extra) if raw_extra else DEFAULT_UPLOAD_OCR_EXTRA_SEC
+        )
+    return max(0.0, float(sleep_sec)), max(0.0, float(ocr_extra_sec))
+
+
+def idle_after_upload_sec(
+    *,
+    base_sleep_sec: float,
+    ocr_extra_sec: float,
+    response: dict[str, Any] | None,
+) -> float:
+    """다음 업로드 전 대기 초. next=ocr_queued 이면 OCR 워커 여유를 위해 가산."""
+    wait = max(0.0, float(base_sleep_sec))
+    next_val = ""
+    if isinstance(response, dict):
+        next_val = str(response.get("next") or "")
+        data = response.get("data")
+        if not next_val and isinstance(data, dict):
+            next_val = str(data.get("next") or "")
+    if next_val == "ocr_queued":
+        wait += max(0.0, float(ocr_extra_sec))
+    return wait
 
 
 def matched_messages_nonempty(payload: dict[str, Any]) -> bool:
@@ -32,7 +75,9 @@ def matched_messages_nonempty(payload: dict[str, Any]) -> bool:
     for m in msgs:
         if not isinstance(m, dict):
             continue
-        if str(m.get("text") or "").strip():
+        text = str(m.get("text") or "").strip()
+        # [변경사유]: '사진' 마커만 있으면 EMPTY 로 취급
+        if text and not is_attachment_marker_text(text):
             return True
     return False
 
@@ -97,6 +142,15 @@ def build_upload_summary(
         "EMPTY_CONTEXT": classified.get("empty_adjacent_count", 0),
         "FILE_MISSING": classified.get("file_missing_count", 0),
         "READY": classified.get("ready_count", 0),
+        "SIMILAR_DEFERRED_BLOCKED": len(
+            classified.get("similar_deferred_groups", []) or []
+        ),
+        "SIMILAR_SKIPPED_REPRESENTATIVE": classified.get(
+            "similar_skipped_representative_count", 0
+        ),
+        "SIMILAR_SKIPPED_PARTIAL": classified.get(
+            "similar_skipped_partial_count", 0
+        ),
     }
 
 
@@ -120,6 +174,9 @@ def echo_summary_safe(summary: dict[str, Any]) -> None:
         f"EMPTY_CONTEXT={summary.get('EMPTY_CONTEXT', 0)} "
         f"FILE_MISSING={summary.get('FILE_MISSING', 0)} "
         f"READY={summary.get('READY', 0)} "
+        f"SIMILAR_DEFERRED_BLOCKED={summary.get('SIMILAR_DEFERRED_BLOCKED', 0)} "
+        f"SIMILAR_SKIPPED_REPRESENTATIVE={summary.get('SIMILAR_SKIPPED_REPRESENTATIVE', 0)} "
+        f"SIMILAR_SKIPPED_PARTIAL={summary.get('SIMILAR_SKIPPED_PARTIAL', 0)} "
         f"dry_run={summary.get('dry_run')} "
         f"blocked={summary.get('blocked')}"
     )
@@ -240,19 +297,38 @@ def cmd_upload(
     allow_empty_caption: bool = True,
     require_adjacent: bool = False,
     result_json: Path | None = None,
+    sleep_sec: float | None = None,
+    ocr_extra_sec: float | None = None,
 ) -> dict[str, Any]:
     """
     dry_run=True(기본): 매니페스트만 기록 + empty/file_missing 통계.
     dry_run=False: READY + EMPTY(이미지만) 업로드. file_missing만 스킵.
     [변경사유]: 운영 — 포스터-only도 올려야 함. empty로 배치 전체 차단 금지.
     require_adjacent=True 일 때만 empty 있으면 전체 차단 (엄격 모드).
+    [변경사유]: 실전송 시 장당 유휴(sleep) — 서비스 similar/OCR 부하 완화.
     """
     photos_root = root / "photos"
+    pace_sleep, pace_ocr_extra = resolve_upload_pace_sec(
+        sleep_sec=sleep_sec, ocr_extra_sec=ocr_extra_sec
+    )
     manifest = build_batch_manifest(settings, limit=limit)
     out = out_manifest or (settings.db_path.parent / "last_upload_manifest.json")
     write_manifest(manifest, out)
 
     classified = classify_upload_requests(manifest["requests"], root=root)
+    similar_policy = manifest.get("similar_policy") or {}
+    similar_skipped = list(similar_policy.get("skipped") or [])
+    similar_deferred_groups = list(similar_policy.get("deferred_groups") or [])
+    classified["similar_skipped"] = similar_skipped
+    classified["similar_deferred_groups"] = similar_deferred_groups
+    classified["similar_skipped_representative_count"] = sum(
+        1 for item in similar_skipped if item.get("reason") == "similar_non_representative"
+    )
+    classified["similar_skipped_partial_count"] = sum(
+        1
+        for item in similar_skipped
+        if item.get("reason") == "similar_partial_non_representative"
+    )
     result_path = result_json or (settings.db_path.parent / "upload-result.json")
 
     # [변경사유]: allow_empty_caption 기본 True — False만 오면 require_adjacent와 동일 취급(하위호환)
@@ -262,6 +338,7 @@ def cmd_upload(
         summary = build_upload_summary(
             dry_run=True,
             classified=classified,
+            blocked=bool(similar_deferred_groups),
             allow_empty_caption=not strict_adjacent,
         )
         detail = {
@@ -271,10 +348,18 @@ def cmd_upload(
             "item_count": manifest["item_count"],
             "empty_adjacent": classified["empty_adjacent"],
             "file_missing": classified["file_missing"],
+            "similar_skipped": similar_skipped,
+            "similar_deferred_groups": similar_deferred_groups,
+            "grouped_photo_candidates": list(
+                manifest.get("grouped_photo_candidates") or []
+            ),
             # [변경사유]: dry-run은 payload 본문 제외 — 경로·id만
             "ready_rels": [r.get("rel") for r in classified["ready"]],
             "note": "EMPTY_CONTEXT items are uploaded by default (poster-only OK)",
         }
+        if similar_deferred_groups:
+            detail["error"] = "SIMILAR_DEFERRED_BLOCKED"
+            detail["hint"] = "run similar-review and decide each deferred group before upload"
         write_upload_result_json(result_path, detail)
         log.info(
             "upload dry-run items=%s empty=%s missing=%s ready=%s",
@@ -291,6 +376,39 @@ def cmd_upload(
             "result_json": str(result_path),
         }
 
+    if similar_deferred_groups:
+        summary = build_upload_summary(
+            dry_run=False,
+            classified=classified,
+            blocked=True,
+            allow_empty_caption=not strict_adjacent,
+        )
+        detail = {
+            "summary": summary,
+            "error": "SIMILAR_DEFERRED_BLOCKED",
+            "hint": "run similar-review and decide each deferred group before upload",
+            "similar_deferred_groups": similar_deferred_groups,
+            "similar_skipped": similar_skipped,
+            "grouped_photo_candidates": list(
+                manifest.get("grouped_photo_candidates") or []
+            ),
+            "empty_adjacent": classified["empty_adjacent"],
+            "file_missing": classified["file_missing"],
+            "manifest": str(out),
+        }
+        write_upload_result_json(result_path, detail)
+        log.warning(
+            "upload blocked SIMILAR_DEFERRED_BLOCKED groups=%s",
+            len(similar_deferred_groups),
+        )
+        return {
+            **summary,
+            "item_count": manifest["item_count"],
+            "manifest": str(out),
+            "result_json": str(result_path),
+            "error": "SIMILAR_DEFERRED_BLOCKED",
+        }
+
     # [변경사유]: 엄격 모드(--require-adjacent)만 empty 시 전체 차단
     if classified["empty_adjacent_count"] > 0 and strict_adjacent:
         summary = build_upload_summary(
@@ -305,6 +423,8 @@ def cmd_upload(
             "hint": "default uploads poster-only; omit --require-adjacent",
             "empty_adjacent": classified["empty_adjacent"],
             "file_missing": classified["file_missing"],
+            "similar_skipped": similar_skipped,
+            "similar_deferred_groups": similar_deferred_groups,
             "manifest": str(out),
         }
         write_upload_result_json(result_path, detail)
@@ -363,7 +483,13 @@ def cmd_upload(
             continue
         upload_queue.append({**ea, "payload": req, "file_path": str(fp)})
 
-    for entry in upload_queue:
+    log.info(
+        "upload pace sleep_sec=%s ocr_extra_sec=%s queue=%s",
+        pace_sleep,
+        pace_ocr_extra,
+        len(upload_queue),
+    )
+    for idx, entry in enumerate(upload_queue):
         req_payload = entry["payload"]
         file_path = Path(entry["file_path"])
         rel = str(entry.get("rel") or "")
@@ -386,6 +512,7 @@ def cmd_upload(
                 }
             )
             continue
+        resp: dict[str, Any] | None = None
         try:
             resp = upload_one(
                 endpoint=ep,
@@ -397,6 +524,24 @@ def cmd_upload(
         except Exception as e:  # noqa: BLE001 — 배치 계속
             results.append({"ok": False, "error": str(e), "rel": rel})
 
+        # [변경사유]: 마지막 건 제외 — 장당 유휴로 frontend/OCR/similar 부하 완화
+        if idx < len(upload_queue) - 1:
+            wait = idle_after_upload_sec(
+                base_sleep_sec=pace_sleep,
+                ocr_extra_sec=pace_ocr_extra,
+                response=resp,
+            )
+            if wait > 0:
+                log.info(
+                    "upload idle %.1fs after rel=%s next=%s (%s/%s)",
+                    wait,
+                    Path(rel).name,
+                    (resp or {}).get("next"),
+                    idx + 1,
+                    len(upload_queue),
+                )
+                time.sleep(wait)
+
     ok_n = sum(1 for r in results if r.get("ok"))
     fail_n = len(results) - ok_n
     summary = build_upload_summary(
@@ -406,20 +551,27 @@ def cmd_upload(
         fail=fail_n,
         allow_empty_caption=not strict_adjacent,
     )
+    summary["UPLOAD_SLEEP_SEC"] = pace_sleep
+    summary["UPLOAD_OCR_EXTRA_SEC"] = pace_ocr_extra
     detail = {
         "summary": summary,
         "manifest": str(out),
         "results": results,
         "empty_adjacent": classified["empty_adjacent"],
         "file_missing": classified["file_missing"],
+        "similar_skipped": similar_skipped,
+        "similar_deferred_groups": similar_deferred_groups,
+        "grouped_photo_candidates": list(manifest.get("grouped_photo_candidates") or []),
     }
     write_upload_result_json(result_path, detail)
     log.info(
-        "upload done OK=%s FAIL=%s EMPTY_CONTEXT=%s FILE_MISSING=%s",
+        "upload done OK=%s FAIL=%s EMPTY_CONTEXT=%s FILE_MISSING=%s sleep=%s ocr_extra=%s",
         ok_n,
         fail_n,
         classified["empty_adjacent_count"],
         classified["file_missing_count"],
+        pace_sleep,
+        pace_ocr_extra,
     )
     # photos_root unused warning avoid — kept for path parity with classify
     _ = photos_root

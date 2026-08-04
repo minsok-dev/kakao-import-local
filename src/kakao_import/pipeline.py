@@ -215,6 +215,8 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
             group_text_max_gap_minutes=settings.group_text_max_gap_minutes,
             different_sender_grace_seconds=settings.different_sender_grace_seconds,
             different_sender_max_chars=settings.different_sender_max_chars,
+            # [변경사유]: 사진 앞 텍스트 ≤2분 귀속
+            group_text_before_max_seconds=settings.group_text_before_max_seconds,
         )
 
         group_ids: dict[str, int] = {}
@@ -298,14 +300,23 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
                 ),
             )
 
+        bundle_candidates = sum(1 for g in result.groups if g.get("bundle_candidate"))
         summary = {
             "batch_id": batch_id,
             "assignments": len(result.assignments),
             "groups": len(result.groups),
+            "group_bundle_candidates": bundle_candidates,
             "confidence": conf_counts,
             "reviews": len(result.reviews),
             "group_texts": len(result.group_texts),
         }
+        log.info(
+            "match summary groups=%s bundle_candidates=%s assignments=%s reviews=%s",
+            len(result.groups),
+            bundle_candidates,
+            len(result.assignments),
+            len(result.reviews),
+        )
         finish_batch(conn, batch_id, summary)
         conn.commit()
         return summary

@@ -1,15 +1,15 @@
 # 카카오톡 로컬 수집 · Import — 개발 계획서
 
-<!-- [변경사유]: v1.3 — Phase 3.5 운영 안정화(최우선). caption fill·sns append·gate·file_missing·UTF-8. Phase 4 보류 -->
+<!-- [변경사유]: v1.4 — Phase 4.2 similar upload policy 반영. deferred 차단·grouped_photo 후보 메타 -->
 
 | 항목 | 내용 |
 |------|------|
-| 문서 버전 | **1.3** |
-| 기준일 | 2026-08-03 |
+| 문서 버전 | **1.4** |
+| 기준일 | 2026-08-04 |
 | 레포 | `kakao-import-local` (로컬) · `frontend` / `backend` (Phase 3~) |
 | 입력 샘플 | `input/raw/chats/` + `input/raw/photos/` (gitignore) |
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
-| **현재 최우선** | **[Phase 3.5 운영 안정화](./phase3-ops-stabilization.md)** (Phase 4 전) |
+| **현재 초점** | **Phase 4.2 similar upload policy 반영** (`deferred` 차단 + dry-run/result 노출) |
 
 관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md)
 
@@ -75,9 +75,14 @@ input/raw/
 2. 메시지 절대시각 = **직전 일자 헤더 날짜** + `[오전/오후 h:mm]`.
 3. 동일 분(또는 짧은 윈도우)의 `사진` / `사진 N장` 후보 수집.
 4. 같은 분에 사진 줄 K개 · 파일 K개 → **초 단위 정렬 후 1:1**.
-5. 후보가 여러 방·여러 화자·개수 불일치 → `ambiguous` → review.
-6. 디스크에 없는 `[사진]` 슬롯은 “파일 없음” (메시지 슬롯 ≫ 파일 수 — 정상).
-7. 동일 SHA 1파일 ↔ 여러 방 메시지 = **다대다** 허용.
+5. <!-- [변경사유]: 부분 매칭 — 누락보다 과다 귀속 우선 -->
+   후보 개수 불일치여도 **있는 파일은 순서대로 배정**(medium+review). 부족 슬롯·남는 파일만 review.
+   매칭된 파일은 **동일 group_text**를 공유한다.
+6. 후보가 여러 방·여러 화자 → `ambiguous` → review.
+7. 디스크에 없는 `[사진]` 슬롯은 “파일 없음” (메시지 슬롯 ≫ 파일 수 — 정상).
+8. 동일 SHA 1파일 ↔ 여러 방 메시지 = **다대다** 허용.
+9. <!-- [변경사유]: 선행 텍스트 ≤2분 귀속 -->
+   설명 텍스트: 사진 **앞**(같은 발신자·≤2분) + 사진 **뒤**(기존 max_gap) 모두 수집(앞→뒤 순서).
 
 ### 2.4 실측으로 알아 둔 규모
 
@@ -103,8 +108,9 @@ input/raw/photos + input/raw/chats
   local history (멱등)
   SHA exact (로컬·이력)
   (Phase2) text merge / modes
-  (Phase3.5) caption replay · empty gate · file_missing · UTF-8  ← 지금
-  (Phase4) similar groups + 결정 UI  ← 안정화·E2E 후
+  (Phase3.5) caption replay · empty gate · file_missing · UTF-8  ✅
+  (Phase4.1) similar review UI · partial subgroup  ✅
+  (Phase4.2) similar upload policy + deferred 차단 + grouped-photo 후보 메타  ← 지금
   report: matched | ambiguous | unmatched
         │
         ▼  Phase 3
@@ -134,23 +140,22 @@ ImportItem → matched/merged message 저장
 | **1.5** | 보류 | watcher / 자동 실행 | **3.5 안정화·E2E 후** (잘못된 자동 유입 방지) |
 | **2** | — | 텍스트 정규화·merge·safe/balanced/auto | ✅ 구현 완료 |
 | **3** | — | Import·인증·서버 exact → **SNS 병합 공통 서비스** | ✅ 기능 구현 (스테이징 수동 검증·운영 이슈는 3.5) |
-| **3.5** | **지금 최우선** | **운영 안정화** — caption replay · matched_messages gate · file_missing · UTF-8 | 데이터 고착·오염 해소 + E2E |
-| **4** | 이후 | similar + **그룹 합침/분리 UI** | review only · **3.5 완료 전 착수 금지** |
+| **3.5** | 완료 | **운영 안정화** — caption replay · matched_messages gate · file_missing · UTF-8 | 데이터 고착·오염 해소 + E2E |
+| **4** | 진행중 | similar + **그룹 합침/분리 UI** + upload policy | 4.1 review UI ✅ / 4.2 로컬 업로드 반영 진행 |
 | **5** | 마지막 | 제한 자동 승인 | 화이트리스트만 |
 
 ### 우선순위 한 줄
 
 ```text
 [기능 완료] Phase 0~3
-→ [지금] Phase 3.5 운영 안정화 + E2E
+→ [완료] Phase 3.5 운영 안정화 + E2E
 → (병렬 가능) Legacy 백필 / Similar enforce 점검
-→ Phase 4 로컬 similar UI
+→ Phase 4.2 similar upload policy / grouped-photo 구조 보강
 → Phase 1.5 watcher · Phase 5 제한 자동화
 ```
 
-**판단:** 카카오는 “기능 개발”이 아니라 **운영 안정화** 단계다.  
-새 큰 기능(Phase 4+)보다 **데이터 품질·반복 실행 안정성**이 우선이다.  
-상세: [phase3-ops-stabilization.md](./phase3-ops-stabilization.md)
+**판단:** Phase 3.5 안정화가 끝난 뒤에는,  
+Phase 4.2에서 **similar decision을 실제 업로드 후보에 반영**하는 것이 다음 우선이다.
 
 ---
 
@@ -329,22 +334,73 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
 ---
 
-### Phase 4 — Similar · 그룹 결정 UI
+### Phase 4 — Similar · 그룹 결정 UI / 업로드 반영
 
 **착수 조건:**  
-- **업로드 제어·시각 리뷰 UI (4.2+):** Phase **3.5** + E2E 완료 후.  
-- **탐지-only (4.0):** signature + 그룹 탐지 + 로그/(선택) decision 저장 — upload 미변경이면 **3.5와 병렬 가능**.
+- **업로드 제어·시각 리뷰 UI (4.2):** Phase **3.5** + E2E 완료 후 착수  
+- **탐지-only (4.0):** signature + 그룹 탐지 + 로그/(선택) decision 저장 — upload 미변경이면 **3.5와 병렬 가능**
 
 - Phase 0.5에서 고른 방식으로 signature  
 - **N≥2 그룹 content decision:** `same_content` / `different_content` / `partial` / `deferred`  
-- **upload policy (decision과 분리):** `same_content` → 대표 1장, `different_content` → 전체, `deferred` → 없음  
+- **upload policy (decision과 분리):** `same_content` → 대표 1장, `different_content` → 전체, `partial` → subgroup 대표+단독, `deferred` → 기본 차단
 - 재결정: 전송 전 로컬 decision만 변경 (원본 파일 불변)  
 - **시각 리뷰 UI 필수** (Python 로컬 웹 또는 관리자 Next — Phase 4 본구현 착수 시 선택)  
   <!-- [변경사유]: Phase 4.1 — 로컬 `similar-review` 썸네일 UI(decision only) 제공 -->
   - **4.1:** `kakao-import similar-review` — 로컬 브라우저 썸네일 + decision + **partial 서브그룹** (upload 미적용)  
-  - **4.2+:** upload policy로 큐 반영 (3.5·E2E 이후)  
+  - **4.2:** upload policy로 큐 반영 + dry-run/result JSON 사유 노출 ✅  
+  - **4.2+:** grouped-photo main/sub 서버 연동은 후속 판단
 - similar **자동 병합·자동 삭제 없음**  
 - 서버 Similar hold가 이미 있으므로, 로컬 similar는 **배치 안 정리·운영 보조** (서비스 전체 중복 방지 본경로 아님)
+
+#### 추가 검토 메모 — 동일 시간대·동일 발신자 묶음 사진의 1콘텐츠 등록
+
+<!-- [변경사유]: 2026-08-04 — 운영 검토 요청. 카카오 `사진`/`사진 N장` 묶음을 1개 콘텐츠의 main+sub로 등록하는 후속 요구 기록 -->
+
+현재 카카오 import는 서버 업로드 자체는 여전히 **사진 1장 중심**이다.  
+즉, 카카오에서 같은 발신자가 같은 시각대에 올린 묶음 사진이라도:
+
+- 매칭용으로는 `photo` / `photo_multi` 슬롯 묶음
+- Similar 관점에서는 유사 이미지 그룹
+- 업로드/콘텐츠 관점에서는 **개별 사진 단위**
+
+로 처리하며, **하나의 콘텐츠에 main + sub poster 세트로 자동 등록하지 않는다.**
+
+운영에서 검토할 후속 요구:
+
+```text
+같은 발신자 + 같은 분(또는 짧은 윈도우) + 연속 사진/사진 N장
+→ 1개 콘텐츠 후보 그룹으로 해석
+→ 대표(main) 1장 + sub 나머지
+```
+
+대표 사례:
+
+```text
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] [CASE-B] 화요 바차타 특강 안내
+```
+
+위 케이스는 현재 로직에서는 **사진 슬롯 3개 + 후속 설명 1개**로 본다.  
+로컬 파일이 1장뿐이면 count mismatch로 `unmatched`가 되기 쉽고, 후속 설명도 대표 1장에 자동 귀속되지 않는다.
+
+향후 구현 시 검토할 규칙:
+
+1. **그룹 기준:** 동일 발신자·동일 분(또는 tolerance)·연속 `사진` / `사진 N장`
+2. **등록 단위:** 1개 콘텐츠 후보 그룹
+3. **대표 선택:** 첫 장 / 수동 지정 / 해상도·용량 우선 등 별도 규칙
+4. **sub 등록:** 대표 외 멤버를 서브 포스터로 연결
+5. **텍스트 귀속:** 후속 group_text를 그룹 전체 설명으로 보고 대표 콘텐츠에 저장
+6. **개수 불일치:** 채팅 슬롯 수 ≠ 로컬 파일 수일 때 보수적으로 review 또는 partial 처리
+7. **Similar/Exact와 충돌:** 같은 콘텐츠 그룹화와 similar decision, exact reuse 간 우선순위 정리 필요
+
+**현재 4.2 반영 범위:**  
+- 로컬 payload/manifest 에 `grouped_photo_candidates` 메타를 남긴다.
+- 같은 묶음 사진이라도 서버에는 아직 **대표+sub 자동 등록하지 않는다**.
+
+**판단:** 이 요구는 upload policy를 넘어  
+**매칭·payload·서버 콘텐츠 연결(main/sub)** 규칙까지 바뀌므로 후속 설계/구현 범위로 유지한다.
 
 → [similar-group-decisions.md](./similar-group-decisions.md)
 
@@ -381,12 +437,10 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 
 ## 8. 즉시 다음 액션
 
-1. **Phase 3.5 P1~P4** 구현 ([phase3-ops-stabilization.md](./phase3-ops-stabilization.md))  
-   - 서버: 멱등 replay 시 `mergeKakaoCaption` (fill + sns append)  
-   - 로컬: empty adjacent gate · file_missing prune · UTF-8 요약  
-2. **E2E** Case A~F (신규 / replay 개선 / Exact append / empty gate / file_missing / no-op)  
-3. (이후·병렬) Legacy 백필 · Similar enforce 운영 점검  
-4. Phase **4** — 3.5 완료 전 착수하지 않음  
+1. **Phase 4.2** 실데이터 검증: `same_content` / `different_content` / `partial` / `deferred` dry-run 확인
+2. grouped-photo 를 실제 서버 main/sub 등록으로 확장할지 결정
+3. (병렬) Legacy 백필 · Similar enforce 운영 점검
+4. 필요 시 Phase 4.2+ 후속 설계 문서화
 
 ---
 
@@ -398,3 +452,4 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | 1.1 | parser 우선·이력·개인정보·0.5·서버 exact/GPT·similar 그룹 |
 | 1.2 | **공용 photos+방별 chats 확정**, **파일명 시각 매칭 주 경로**, ESENCIA golden, Phase 1 완료=해당 테스트 통과, 계획서 재정리 |
 | **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착·fill + sns append. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |
+| **1.4** | **Phase 4.2 반영**. similar decision 기반 upload 후보 필터, `deferred` 기본 차단, dry-run/result 사유 노출, `grouped_photo_candidates` 메타 추가 |

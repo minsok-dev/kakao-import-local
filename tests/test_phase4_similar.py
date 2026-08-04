@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kakao_import.config import Settings
 from kakao_import.db import connect, init_schema
+from kakao_import.payload import build_batch_manifest
 from kakao_import.similar_cluster import (
     PhotoSig,
     cluster_similar_photos,
@@ -80,6 +82,73 @@ def _insert_sig(conn, photo_id: int, dhash: str, phash: str, sha: str) -> None:
         """,
         (photo_id, dhash, phash, sha),
     )
+
+
+def _settings(tmp_path: Path, db: Path) -> Settings:
+    root = tmp_path / "raw"
+    return Settings(
+        export_root=root,
+        db_path=db,
+        log_level="INFO",
+        match_tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+        merge_mode="balanced",
+        similar_max_distance=10,
+    )
+
+
+def _insert_exact_group(conn, photo_id: int, sha: str) -> None:
+    gid = conn.execute(
+        """
+        INSERT INTO exact_sha_group (sha256, representative_photo_id, member_count)
+        VALUES (?, ?, 1)
+        """,
+        (sha, photo_id),
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO exact_sha_member (group_id, photo_id, is_representative, excluded_from_upload)
+        VALUES (?, ?, 1, 0)
+        """,
+        (gid, photo_id),
+    )
+
+
+def _insert_bundle_match_context(conn, *, batch_id: int, photo_ids: list[int]) -> None:
+    chat_id = conn.execute(
+        """
+        INSERT INTO chat_source (
+          rel_path, room_title, file_size, mtime_ns, content_sha256, encoding, last_batch_id
+        ) VALUES ('chats/room.txt', 'room', 1, 1, 'chatsha', 'utf-8', ?)
+        """,
+        (batch_id,),
+    ).lastrowid
+    msg_id = conn.execute(
+        """
+        INSERT INTO parsed_message (
+          chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, photo_count, line_no
+        ) VALUES (?, 1, 'text', '달콩', '2026-08-04T13:23:00', '[CASE-B] 화요 바차타 특강 안내', '[CASE-B] 화요 바차타 특강 안내', ?, 1)
+        """,
+        (chat_id, len(photo_ids)),
+    ).lastrowid
+    group_id = conn.execute(
+        """
+        INSERT INTO image_group (batch_id, chat_id, group_key, confidence, review_required, match_reason)
+        VALUES (?, ?, 'bundle-1', 'high', 0, 'same_sender_same_minute')
+        """,
+        (batch_id, chat_id),
+    ).lastrowid
+    for idx, photo_id in enumerate(photo_ids):
+        conn.execute(
+            """
+            INSERT INTO photo_message_assignment (
+              batch_id, group_id, photo_id, message_id, slot_index, confidence, match_reason, review_required
+            ) VALUES (?, ?, ?, ?, ?, 'high', 'bundle', 0)
+            """,
+            (batch_id, group_id, photo_id, msg_id, idx),
+        )
 
 
 def test_rebuild_and_decide_does_not_touch_exact_exclude(tmp_path: Path) -> None:
@@ -183,3 +252,88 @@ def test_partial_subgroups_same_and_different(tmp_path: Path) -> None:
         except ValueError as exc:
             assert "multi-member" in str(exc)
         conn.commit()
+
+
+def test_build_batch_manifest_same_content_keeps_representative_and_bundle_shape(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "same.db"
+    init_schema(db)
+    settings = _settings(tmp_path, db)
+    photos = settings.export_root / "photos"
+    photos.mkdir(parents=True)
+    (photos / "a.jpg").write_bytes(b"a")
+    (photos / "b.jpg").write_bytes(b"b")
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        batch_id = conn.execute(
+            "INSERT INTO import_batch (root_rel, started_at, status) VALUES ('raw', datetime('now'), 'done')"
+        ).lastrowid
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="a" * 64)
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="b" * 64)
+        _insert_exact_group(conn, p1, "a" * 64)
+        _insert_exact_group(conn, p2, "b" * 64)
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "a" * 64)
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "b" * 64)
+        _insert_bundle_match_context(conn, batch_id=batch_id, photo_ids=[p1, p2])
+        rebuild_similar_groups(conn, max_distance=10)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn, group_id=gid, decision="same_content", representative_photo_id=p1
+        )
+        conn.commit()
+
+    manifest = build_batch_manifest(settings)
+    assert manifest["item_count"] == 1
+    req = manifest["requests"][0]
+    assert req["item"]["local_item_id"].startswith(f"photo:{p1}:")
+    assert req["item"]["matched_messages"][0]["text"] == "[CASE-B] 화요 바차타 특강 안내"
+    assert len(manifest["similar_policy"]["skipped"]) == 1
+    assert manifest["similar_policy"]["skipped"][0]["reason"] == "similar_non_representative"
+    assert len(manifest["grouped_photo_candidates"]) == 1
+    assert manifest["grouped_photo_candidates"][0]["slot_count"] == 2
+    assert manifest["grouped_photo_candidates"][0]["bundle_candidate"] is True
+
+
+def test_build_batch_manifest_partial_keeps_subgroup_rep_and_singleton(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "partial.db"
+    init_schema(db)
+    settings = _settings(tmp_path, db)
+    photos = settings.export_root / "photos"
+    photos.mkdir(parents=True)
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        (photos / name).write_bytes(name.encode())
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="a" * 64)
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="b" * 64)
+        p3 = _insert_photo(conn, rel="photos/c.jpg", sha="c" * 64)
+        for pid, sha, dh in (
+            (p1, "a" * 64, "0000000000000000"),
+            (p2, "b" * 64, "0000000000000000"),
+            (p3, "c" * 64, "0000000000000001"),
+        ):
+            _insert_exact_group(conn, pid, sha)
+            _insert_sig(conn, pid, dh, "0000000000000000", sha)
+        rebuild_similar_groups(conn, max_distance=10)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn,
+            group_id=gid,
+            decision="partial",
+            subgroups=[
+                {"photo_ids": [p1, p2], "representative_photo_id": p1},
+                {"photo_ids": [p3]},
+            ],
+        )
+        conn.commit()
+
+    manifest = build_batch_manifest(settings)
+    kept_ids = [req["item"]["local_item_id"].split(":")[1] for req in manifest["requests"]]
+    assert kept_ids == [str(p1), str(p3)]
+    assert len(manifest["similar_policy"]["skipped"]) == 1
+    assert manifest["similar_policy"]["skipped"][0]["reason"] == (
+        "similar_partial_non_representative"
+    )

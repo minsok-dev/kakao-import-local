@@ -1,6 +1,6 @@
 # Phase 0 — Contracts
 
-<!-- [변경사유]: v1.1 — 샘플·정답 선행, 멱등 fingerprint, 개인정보, GPT/exact는 Phase3 계약 링크 -->
+<!-- [변경사유]: v1.2 — Phase 4.2 similar upload policy 반영 메모 추가 -->
 
 ## 1. 수집 경로
 
@@ -105,12 +105,19 @@ ImportItem
 ingest에만 쌓이고 GPT에 안 쓰는 경로 금지.  
 crawl `skipped_dup` 정책을 카카오 Import에 그대로 적용하지 않음.
 
-## 7. Similar 그룹 (Phase 4, 계약 예고)
+## 7. Similar 그룹 (Phase 4 계약 / 4.2 반영)
 
 <!-- [변경사유]: 업로드 제어·UI는 Phase 3.5·E2E 이후. 탐지-only는 병렬 가능. 상세: similar-group-decisions.md -->
 
 [similar-group-decisions.md](./similar-group-decisions.md)  
 decision: `same_content` / `different_content` / `partial` / `deferred` (upload policy는 문서에서 분리).
+
+<!-- [변경사유]: Phase 4.2 — 로컬 manifest/upload 단계의 실제 계약 메모 -->
+- `same_content`: representative 1건만 upload 후보
+- `different_content`: 전원 후보 유지
+- `partial`: subgroup 대표 + singleton만 후보 유지
+- `deferred`: dry-run / upload 모두 기본 차단
+- 묶음 사진(main+sub)은 아직 서버 payload 계약으로 승격하지 않았고, 로컬 manifest 에서만 `grouped_photo_candidates` 메타로 보조 노출
 
 ## 8. 로그
 

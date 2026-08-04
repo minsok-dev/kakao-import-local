@@ -272,6 +272,24 @@ def export_payload_cmd(
     default=None,
     help="상세 결과 UTF-8 JSON (기본 data/upload-result.json)",
 )
+@click.option(
+    "--sleep-sec",
+    type=float,
+    default=None,
+    help=(
+        "실전송 장당 유휴(초). 기본 5. env KAKAO_IMPORT_UPLOAD_SLEEP_SEC. "
+        "0이면 유휴 없음"
+    ),
+)
+@click.option(
+    "--ocr-extra-sec",
+    type=float,
+    default=None,
+    help=(
+        "next=ocr_queued 일 때 추가 유휴(초). 기본 5. "
+        "env KAKAO_IMPORT_UPLOAD_OCR_EXTRA_SEC"
+    ),
+)
 @click.pass_context
 def upload_cmd(
     ctx: click.Context,
@@ -283,6 +301,8 @@ def upload_cmd(
     allow_empty_caption: bool,
     require_adjacent: bool,
     result_json: Path | None,
+    sleep_sec: float | None,
+    ocr_extra_sec: float | None,
 ) -> None:
     """Phase3: Import 업로드 (기본 dry-run). 이미지만 있는 건도 기본 업로드."""
     settings = ctx.obj["settings"]
@@ -296,6 +316,8 @@ def upload_cmd(
         allow_empty_caption=allow_empty_caption,
         require_adjacent=require_adjacent,
         result_json=result_json,
+        sleep_sec=sleep_sec,
+        ocr_extra_sec=ocr_extra_sec,
     )
     # [변경사유]: Phase 3.5 P4 — 콘솔은 요약만 (전체 JSON+emoji로 cp949 깨짐 방지)
     upload_mod.echo_summary_safe(summary)

@@ -8,7 +8,9 @@
 > 서버 Similar hold가 서비스 전체 중복 방지 **본경로**이며, 로컬 similar는 **배치 안 정리·운영 보조**다.
 >
 > **탐지-only (Phase 4.0 스파이크):** signature 공통 + 그룹 탐지 + 로그/목록 + (선택) decision 저장만은  
-> **3.5와 병렬 가능**. 이 단계에서는 **upload 큐 동작을 바꾸지 않는다** (전 멤버 후보 유지 가능).
+> **3.5와 병렬 가능**.  
+> <!-- [변경사유]: Phase 4.2 반영 — 이제 upload 큐는 decision을 실제로 따른다 -->
+> **Phase 4.2부터는 upload/dry-run 이 decision 기반으로 후보를 필터링하고, `deferred` 는 기본 차단한다.**
 
 ## 목적
 
@@ -94,12 +96,75 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 
 | decision | upload policy | 업로드 |
 |----------|---------------|--------|
-| `same_content` | `upload_representative` | 대표 **1장**만 큐에 포함. members는 `excluded_from_upload` |
+| `same_content` | `upload_representative` | 대표 **1장**만 큐에 포함 |
 | `different_content` | `upload_all_members` | 멤버 **전체** 업로드 |
 | `partial` | 서브그룹별 위 규칙 적용 | 서브그룹 수만큼 item |
 | `deferred` | `upload_none` | 이번 배치 업로드 **제외** |
 
 대표 미지정 시 임시 규칙(시각·용량 등) 가능 — 최종은 리뷰에서 지정.
+
+<!-- [변경사유]: Phase 4.2 정책 확정 — dry-run/실업로드 차단과 결과 노출 -->
+### Phase 4.2 현재 동작
+
+1. `build_batch_manifest` 단계에서 similar decision을 읽어 업로드 후보를 먼저 거른다.
+2. `same_content` 는 대표 1장만 남기고 나머지는 `similar_non_representative` 로 기록한다.
+3. `partial` 는 **서브그룹 대표 + singleton** 만 남기고 나머지는 `similar_partial_non_representative` 로 기록한다.
+4. `different_content` 는 전원 유지한다.
+5. `deferred` 가 하나라도 남아 있으면:
+   - `dry-run`: `blocked=true`, `SIMILAR_DEFERRED_BLOCKED` 로 요약/결과 JSON 기록
+   - `upload`: 실제 전송 전에 전체 차단
+
+결과 파일(`upload-result.json`, `last_upload_manifest.json`)에는 아래가 함께 남는다.
+
+- `similar_policy.skipped`
+- `similar_policy.deferred_groups`
+- `grouped_photo_candidates` (동일 시간대·동일 발신자 묶음 사진의 향후 main+sub 후보 메타)
+
+## 추가 검토 요구 — 동일 시간대·동일 발신자 사진 그룹의 1콘텐츠 등록
+
+<!-- [변경사유]: 2026-08-04 — 운영 요청. 카카오 앨범/연속 사진을 하나의 콘텐츠(main+sub)로 등록하는 후속 요구 기록 -->
+
+현재 Phase 4 계약은 **similar 그룹의 업로드 제어**에 초점이 있다.  
+즉, 대표 1장만 올릴지 / 전부 올릴지 / 부분 서브그룹으로 볼지를 정하지만,
+**여러 사진을 하나의 콘텐츠의 main+sub 포스터 세트로 자동 등록하는 규칙은 아직 없다.**
+
+대표 사례:
+
+```text
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] 사진
+[달콩, Dalkong] [오후 1:23] [CASE-B] 화요 바차타 특강 안내
+```
+
+현재 해석:
+
+- matcher: **사진 슬롯 3개 + 후속 설명 1개**
+- upload: 사진 **개별 단위**
+- similar: 유사 그룹이면 별도 decision 저장 가능
+- 결과: 로컬 파일 수가 1장뿐이면 count mismatch로 대표 1장에 설명이 자동 귀속되지 않을 수 있음
+
+후속 요구(미구현):
+
+```text
+동일 발신자 + 동일 시간대(예: 같은 분) + 연속 사진/사진 N장
+→ 1개 콘텐츠 그룹 후보
+→ 대표(main) 1장 + sub 나머지
+→ 후속 텍스트는 그룹 공통 설명으로 저장
+```
+
+이 요구가 들어가면 정해야 할 것:
+
+1. **그룹 경계:** 같은 분 / tolerance / 같은 발신자 / 다른 방 충돌 시 처리
+2. **대표 선택:** 첫 장·수동 지정·해상도 기준 등
+3. **sub 포스터 연결:** 서버 `content`/`ocr` main/sub 구조와의 매핑
+4. **텍스트 저장 위치:** 대표만 저장 vs 그룹 메타 별도 보존
+5. **슬롯 수 불일치:** `사진 3장`인데 로컬이 1장/2장만 있을 때 review 정책
+6. **Similar decision과의 관계:** `same_content`가 업로드 대표 1장을 뜻하는지, 또는 1콘텐츠 main+sub 등록까지 포함하는지 재정의 필요
+
+**결론:** 이 요구는 단순 upload policy를 넘어  
+**매칭 + payload + 서버 등록(main/sub)** 규칙 변경이므로, 이번 4.2에서는
+`grouped_photo_candidates` 메타만 로컬 결과에 남기고, **서버 main/sub 자동 등록은 아직 하지 않는다.**
 
 ## 하지 않음 (명시)
 
@@ -130,7 +195,8 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 | Phase 1 | 그룹 테이블 stub 가능, similar 계산 안 함 | — |
 | **Phase 4.0** | signature 공통 + 그룹 **탐지** + 로그/목록 + (선택) decision 저장. **upload 동작 변경 없음** | **3.5와 병렬 가능** |
 | **Phase 4.1** | 로컬 **썸네일 리뷰 UI** + **partial 서브그룹** — decision만 저장, **upload 미적용** | **3.5와 병렬 가능** |
-| **Phase 4.2+** | upload policy 적용 + (필요 시) UI 고도화 + caption 정책 | **3.5 + E2E 이후** |
+| **Phase 4.2** | upload policy 적용 (`same_content`/`different_content`/`partial`/`deferred`) + dry-run/result 가시화 | **3.5 + E2E 이후** |
+| Phase 4.2+ | grouped-photo main/sub 서버 연동 등 후속 고도화 | 후속 판단 |
 
 ## 상태
 
@@ -139,4 +205,6 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 **Phase 4.0 (탐지-only):** `similar-detect` / `similar-list` / `similar-decide` + SQLite `004` ✅  
 **Phase 4.1 (리뷰 UI + partial):** `kakao-import similar-review` — 썸네일·라이트박스·부분 묶기 + `005` ✅  
 decision/서브그룹 저장은 upload 큐·파일 삭제·자동 병합을 수행하지 않음.  
-Phase 4.2+ (upload policy로 큐 필터)는 3.5 E2E 이후.
+<!-- [변경사유]: Phase 4.2 완료 상태 반영 -->
+**Phase 4.2:** upload policy 기반 큐 필터 + `deferred` 기본 차단 + 결과 JSON 노출 ✅  
+묶음 사진은 `grouped_photo_candidates` 메타만 준비했고, 서버 main/sub 자동 등록은 후속.

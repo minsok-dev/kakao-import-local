@@ -1,4 +1,5 @@
 # [변경사유]: Phase1 — 시각·개수·순서 matcher + image group + 후속 텍스트
+# [변경사유]: 선행 텍스트(≤2분) 귀속 + 슬롯/파일 수 불일치 시 부분 매칭·동일 group_text
 """사진↔메시지 매칭."""
 
 from __future__ import annotations
@@ -112,6 +113,7 @@ def match_photos_to_messages(
     group_text_max_gap_minutes: int,
     different_sender_grace_seconds: int,
     different_sender_max_chars: int,
+    group_text_before_max_seconds: int = 120,
 ) -> MatchOutput:
     """
     매칭 수행.
@@ -164,6 +166,7 @@ def match_photos_to_messages(
             confidence = "ambiguous"
             reason = ""
             review = True
+            assign_n = 0
 
             if multi_room:
                 reason = "multi_room_same_minute"
@@ -171,44 +174,60 @@ def match_photos_to_messages(
                 confidence = "high"
                 reason = "same_minute_count_order"
                 review = False
-            elif len(candidates) != len(slots):
-                # tolerance: 유일 대체?
+                assign_n = len(slots)
+            elif len(slots) == 1 and not candidates:
+                # 단일 슬롯 — tolerance 내 유일 미배정 사진
                 reason = "count_mismatch"
-                if len(slots) == 1 and not candidates:
-                    # 단일 슬롯 — tolerance 내 유일 미배정 사진
-                    sole = _unique_tolerance_photo(
-                        slots[0].abs_time, photos_ok, assigned_photos, tolerance_seconds
-                    )
-                    if sole:
-                        candidates = [sole]
-                        confidence = "medium"
-                        reason = "tolerance_unique"
-                        review = True  # medium → review
-                    else:
-                        confidence = "ambiguous"
-                        review = True
+                sole = _unique_tolerance_photo(
+                    slots[0].abs_time, photos_ok, assigned_photos, tolerance_seconds
+                )
+                if sole:
+                    candidates = [sole]
+                    confidence = "medium"
+                    reason = "tolerance_unique"
+                    review = True
+                    assign_n = 1
                 else:
                     confidence = "ambiguous"
                     review = True
+            elif len(candidates) > 0 and len(slots) > 0:
+                # [변경사유]: 슬롯/파일 수 불일치여도 있는 파일은 순서 배정 + 동일 group_text
+                #   부족한 슬롯·남는 파일은 review. 누락보다 과다 귀속이 낫다.
+                assign_n = min(len(candidates), len(slots))
+                confidence = "medium"
+                reason = (
+                    "partial_count_order"
+                    if len(candidates) != len(slots)
+                    else "same_minute_count_order"
+                )
+                review = True
             else:
                 confidence = "ambiguous"
-                reason = "fallback"
+                reason = "count_mismatch" if len(candidates) != len(slots) else "fallback"
                 review = True
 
             out.groups.append(
                 {
                     "group_key": group_key,
                     "chat_id": cid,
+                    "anchor_message_id": int(anchor["id"]),
+                    "photo_sender": slots[0].sender,
+                    "first_abs_time": slots[0].abs_time.isoformat(timespec="seconds"),
+                    "last_abs_time": slots[-1].abs_time.isoformat(timespec="seconds"),
                     "confidence": confidence,
                     "review_required": review,
                     "match_reason": reason,
                     "slot_count": len(slots),
                     "candidate_count": len(candidates),
+                    "assigned_count": assign_n,
+                    "bundle_candidate": len(slots) >= 2,
                 }
             )
 
-            if confidence in ("high", "medium") and len(candidates) == len(slots):
-                for si, (slot, photo) in enumerate(zip(slots, candidates, strict=True)):
+            if assign_n > 0 and confidence in ("high", "medium"):
+                for si in range(assign_n):
+                    slot = slots[si]
+                    photo = candidates[si]
                     assigned_photos.add(photo.photo_id)
                     out.assignments.append(
                         Assignment(
@@ -222,18 +241,35 @@ def match_photos_to_messages(
                             group_key=group_key,
                         )
                     )
-                # 후속 텍스트
+                # 선행(≤2분) + 후속 텍스트 — 매칭된 전 파일이 같은 group_text 공유
                 _attach_group_texts(
                     out,
                     group_key=group_key,
                     msgs=msgs,
+                    first_photo_seq=slots[0].seq,
                     after_seq=slots[-1].seq,
+                    first_photo_time=slots[0].abs_time,
                     last_photo_time=slots[-1].abs_time,
                     photo_sender=slots[0].sender,
+                    before_max=timedelta(seconds=group_text_before_max_seconds),
                     max_gap=timedelta(minutes=group_text_max_gap_minutes),
                     diff_grace=timedelta(seconds=different_sender_grace_seconds),
                     diff_max_chars=different_sender_max_chars,
                 )
+                if reason == "partial_count_order" or (
+                    assign_n < len(slots) or assign_n < len(candidates)
+                ):
+                    out.reviews.append(
+                        {
+                            "kind": "match_partial",
+                            "group_key": group_key,
+                            "reason": reason,
+                            "confidence": confidence,
+                            "slots": len(slots),
+                            "assigned": assign_n,
+                            "candidates": [p.rel_path for p in candidates[:20]],
+                        }
+                    )
             else:
                 # 강제 배정 없음 — review만
                 out.reviews.append(
@@ -299,19 +335,57 @@ def _attach_group_texts(
     *,
     group_key: str,
     msgs: list[dict[str, Any]],
+    first_photo_seq: int,
     after_seq: int,
+    first_photo_time: datetime,
     last_photo_time: datetime,
     photo_sender: str | None,
+    before_max: timedelta,
     max_gap: timedelta,
     diff_grace: timedelta,
     diff_max_chars: int,
 ) -> None:
     """
-    연속 사진 뒤 설명 연결.
-    종료: 다음 사진, 시스템, max_gap, (다른 발신자+grace초과 또는 긴 문장).
-    다른 발신자만으로 즉시 종료하지 않음 — grace·길이 조건.
+    사진 앞(≤before_max, 같은 sender) + 뒤(기존 max_gap) 설명 연결.
+    순서는 앞→뒤. 매칭된 그룹 멤버가 동일 group_text를 공유한다.
     """
+    links: list[GroupTextLink] = []
     seq_g = 0
+
+    # --- 선행 텍스트: 첫 사진 직전을 역순 탐색 후 시간순으로 뒤집기 ---
+    preceding: list[dict[str, Any]] = []
+    for m in reversed(msgs):
+        if int(m["seq"]) >= first_photo_seq:
+            continue
+        kind = m["msg_kind"]
+        if kind in ("photo", "photo_multi"):
+            break
+        if kind == "system":
+            break
+        at = parse_iso(m["abs_time"]) if m.get("abs_time") else None
+        if at is None:
+            continue
+        if first_photo_time - at > before_max:
+            break
+        sender = m.get("sender")
+        if sender != photo_sender:
+            break
+        if kind != "text":
+            break
+        body = (m.get("body_raw") or "").strip()
+        if not body:
+            continue
+        preceding.append(m)
+    preceding.reverse()
+    for m in preceding:
+        seq_g += 1
+        links.append(
+            GroupTextLink(
+                group_key=group_key, message_id=int(m["id"]), seq_in_group=seq_g
+            )
+        )
+
+    # --- 후속 텍스트 (기존 규칙) ---
     for m in msgs:
         if int(m["seq"]) <= after_seq:
             continue
@@ -322,24 +396,25 @@ def _attach_group_texts(
             break
         at = parse_iso(m["abs_time"]) if m.get("abs_time") else None
         if at is None:
-            # 날짜 없는 시스템성 — skip
             continue
         if at - last_photo_time > max_gap:
             break
         sender = m.get("sender")
         body = m.get("body_raw") or ""
         if sender != photo_sender:
-            # 다른 발신자: grace 안 + 짧은 메시지만 스킵(그룹에 안 넣음)하고 계속? 
-            # 규칙: grace 초과 또는 긴 문장 → 그룹 종료. grace 안 짧은 문장 → 넣지 않고 종료도 함(대화 분기).
             # Phase1: 다른 발신자면 설명에 포함하지 않고 그룹 텍스트 수집 종료.
-            # (무조건 즉시 자르되, '포함 안 함'으로 문서화 — grace는 향후 확장용으로만 검사)
             if (at - last_photo_time) > diff_grace or len(body) > diff_max_chars:
                 break
-            break  # 짧은 타발신자도 Phase1에서는 그룹 설명 종료 (테스트로 고정)
-        if kind != "text":
-            # video/emoji/file — 그룹 설명 종료
             break
+        if kind != "text":
+            break
+        if not body.strip():
+            continue
         seq_g += 1
-        out.group_texts.append(
-            GroupTextLink(group_key=group_key, message_id=int(m["id"]), seq_in_group=seq_g)
+        links.append(
+            GroupTextLink(
+                group_key=group_key, message_id=int(m["id"]), seq_in_group=seq_g
+            )
         )
+
+    out.group_texts.extend(links)

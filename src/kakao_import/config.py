@@ -29,6 +29,8 @@ class Settings:
     merge_mode: MergeMode
     # [변경사유]: Phase 4.0 — 서버 MEDIA_SIMILAR_MAX_DISTANCE 기본(10)과 정렬
     similar_max_distance: int = 10
+    # [변경사유]: 사진 앞 설명 귀속 창(초). 운영 합의 2분 이내
+    group_text_before_max_seconds: int = 120
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -60,4 +62,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         different_sender_max_chars=int(os.getenv("DIFFERENT_SENDER_MAX_CHARS") or "80"),
         merge_mode=mode_raw,  # type: ignore[arg-type]
         similar_max_distance=similar_max,
+        group_text_before_max_seconds=int(
+            os.getenv("GROUP_TEXT_BEFORE_MAX_SECONDS") or "120"
+        ),
     )

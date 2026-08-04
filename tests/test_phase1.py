@@ -149,7 +149,8 @@ def test_match_same_minute_order() -> None:
     assert len(out.group_texts) >= 1
 
 
-def test_match_count_mismatch_review() -> None:
+def test_match_count_mismatch_partial_assigns_available() -> None:
+    """슬롯 1·파일 2 → 앞 파일 1장 부분 배정 + 남는 파일 unmatched + review."""
     messages = [
         {
             "id": 1,
@@ -161,6 +162,17 @@ def test_match_count_mismatch_review() -> None:
             "body_raw": "사진",
             "body_norm": "사진",
             "photo_count": 1,
+        },
+        {
+            "id": 2,
+            "chat_id": 1,
+            "seq": 2,
+            "msg_kind": "text",
+            "sender": "S",
+            "abs_time": "2026-07-24T01:01:00",
+            "body_raw": "same caption for all",
+            "body_norm": "same caption for all",
+            "photo_count": None,
         },
     ]
     photos = [
@@ -174,8 +186,166 @@ def test_match_count_mismatch_review() -> None:
         group_text_max_gap_minutes=30,
         different_sender_grace_seconds=120,
         different_sender_max_chars=80,
+        group_text_before_max_seconds=120,
     )
-    assert any(r.get("kind") == "match_ambiguous" for r in out.reviews)
+    assigned = [a for a in out.assignments if a.confidence != "unmatched"]
+    unmatched = [a for a in out.assignments if a.confidence == "unmatched"]
+    assert len(assigned) == 1
+    assert assigned[0].photo_id == 1
+    assert assigned[0].match_reason == "partial_count_order"
+    assert assigned[0].review_required is True
+    assert len(unmatched) == 1 and unmatched[0].photo_id == 2
+    assert any(r.get("kind") == "match_partial" for r in out.reviews)
+    assert any(g.message_id == 2 for g in out.group_texts)
+
+
+def test_match_partial_fewer_files_same_group_text() -> None:
+    """슬롯 3·파일 2 → 2장 배정, 동일 group_text, 부족 슬롯 review."""
+    messages = [
+        {
+            "id": 1,
+            "chat_id": 1,
+            "seq": 1,
+            "msg_kind": "photo",
+            "sender": "S",
+            "abs_time": "2026-07-24T01:10:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+        {
+            "id": 2,
+            "chat_id": 1,
+            "seq": 2,
+            "msg_kind": "photo",
+            "sender": "S",
+            "abs_time": "2026-07-24T01:10:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+        {
+            "id": 3,
+            "chat_id": 1,
+            "seq": 3,
+            "msg_kind": "photo",
+            "sender": "S",
+            "abs_time": "2026-07-24T01:10:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+        {
+            "id": 4,
+            "chat_id": 1,
+            "seq": 4,
+            "msg_kind": "text",
+            "sender": "S",
+            "abs_time": "2026-07-24T01:10:30",
+            "body_raw": "shared desc",
+            "body_norm": "shared desc",
+            "photo_count": None,
+        },
+    ]
+    photos = [
+        PhotoSlot(10, "a.png", datetime(2026, 7, 24, 1, 10, 1)),
+        PhotoSlot(11, "b.png", datetime(2026, 7, 24, 1, 10, 2)),
+    ]
+    out = match_photos_to_messages(
+        photos=photos,
+        messages=messages,
+        tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+        group_text_before_max_seconds=120,
+    )
+    assigned = [a for a in out.assignments if a.confidence != "unmatched"]
+    assert len(assigned) == 2
+    assert {a.group_key for a in assigned} == {assigned[0].group_key}
+    assert all(a.match_reason == "partial_count_order" for a in assigned)
+    assert [g.message_id for g in out.group_texts] == [4]
+    assert any(r.get("kind") == "match_partial" and r.get("assigned") == 2 for r in out.reviews)
+
+
+def test_match_preceding_text_within_2_minutes() -> None:
+    """설명 먼저 → 사진(1분 뒤): 선행 텍스트 귀속."""
+    messages = [
+        {
+            "id": 1,
+            "chat_id": 1,
+            "seq": 1,
+            "msg_kind": "text",
+            "sender": "indy",
+            "abs_time": "2026-08-04T13:53:00",
+            "body_raw": "이번주 금요일 수업 개강합니다",
+            "body_norm": "이번주 금요일 수업 개강합니다",
+            "photo_count": None,
+        },
+        {
+            "id": 2,
+            "chat_id": 1,
+            "seq": 2,
+            "msg_kind": "photo",
+            "sender": "indy",
+            "abs_time": "2026-08-04T13:54:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+    ]
+    photos = [PhotoSlot(1, "poster.png", datetime(2026, 8, 4, 13, 54, 5))]
+    out = match_photos_to_messages(
+        photos=photos,
+        messages=messages,
+        tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+        group_text_before_max_seconds=120,
+    )
+    highs = [a for a in out.assignments if a.confidence == "high"]
+    assert len(highs) == 1
+    assert [g.message_id for g in out.group_texts] == [1]
+
+
+def test_match_preceding_text_over_2_minutes_skipped() -> None:
+    """3분 전 텍스트는 선행 귀속하지 않음."""
+    messages = [
+        {
+            "id": 1,
+            "chat_id": 1,
+            "seq": 1,
+            "msg_kind": "text",
+            "sender": "S",
+            "abs_time": "2026-08-04T13:50:00",
+            "body_raw": "too old",
+            "body_norm": "too old",
+            "photo_count": None,
+        },
+        {
+            "id": 2,
+            "chat_id": 1,
+            "seq": 2,
+            "msg_kind": "photo",
+            "sender": "S",
+            "abs_time": "2026-08-04T13:54:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+    ]
+    photos = [PhotoSlot(1, "p.png", datetime(2026, 8, 4, 13, 54, 1))]
+    out = match_photos_to_messages(
+        photos=photos,
+        messages=messages,
+        tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+        group_text_before_max_seconds=120,
+    )
+    assert out.group_texts == []
 
 
 def test_match_multi_room_conflict() -> None:

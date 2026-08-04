@@ -1,6 +1,6 @@
 # 카카오톡 로컬 수집 · Import — 개발 계획서
 
-<!-- [변경사유]: v1.3 — Phase 3.5 운영 안정화(최우선). caption replace-if-richer·gate·file_missing·UTF-8. Phase 4 보류 -->
+<!-- [변경사유]: v1.3 — Phase 3.5 운영 안정화(최우선). caption fill·sns append·gate·file_missing·UTF-8. Phase 4 보류 -->
 
 | 항목 | 내용 |
 |------|------|
@@ -319,7 +319,7 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 
 | P | 내용 | 요지 |
 |---|------|------|
-| **P1** | caption replay | 문제는 overwrite가 아니라 **고착**. same-source는 **replace-if-richer**(append 금지). placeholder→fill. 빈 incoming→유지. 이종 SNS만 `mergeSnsCaptionAppend` |
+| **P1** | caption replay | 문제는 overwrite가 아니라 **고착**. placeholder→fill. `sns_caption_text` 는 카카오·이종 모두 **`mergeSnsCaptionAppend`**. 빈 incoming→유지 |
 | **P2** | matched_messages gate | dry-run 허용. 실전송 기본 경고/차단. `--allow-empty-caption` 예외 |
 | **P3** | file_missing | 존재 확인·스킵·prune/제외. DB migration 없음 |
 | **P4** | UTF-8 CLI | 콘솔 요약만 + UTF-8 결과 파일 |
@@ -340,6 +340,9 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 - **upload policy (decision과 분리):** `same_content` → 대표 1장, `different_content` → 전체, `deferred` → 없음  
 - 재결정: 전송 전 로컬 decision만 변경 (원본 파일 불변)  
 - **시각 리뷰 UI 필수** (Python 로컬 웹 또는 관리자 Next — Phase 4 본구현 착수 시 선택)  
+  <!-- [변경사유]: Phase 4.1 — 로컬 `similar-review` 썸네일 UI(decision only) 제공 -->
+  - **4.1:** `kakao-import similar-review` — 로컬 브라우저 썸네일 + decision + **partial 서브그룹** (upload 미적용)  
+  - **4.2+:** upload policy로 큐 반영 (3.5·E2E 이후)  
 - similar **자동 병합·자동 삭제 없음**  
 - 서버 Similar hold가 이미 있으므로, 로컬 similar는 **배치 안 정리·운영 보조** (서비스 전체 중복 방지 본경로 아님)
 
@@ -379,7 +382,7 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 ## 8. 즉시 다음 액션
 
 1. **Phase 3.5 P1~P4** 구현 ([phase3-ops-stabilization.md](./phase3-ops-stabilization.md))  
-   - 서버: 멱등 replay 시 `mergeKakaoCaption` / replace-if-richer  
+   - 서버: 멱등 replay 시 `mergeKakaoCaption` (fill + sns append)  
    - 로컬: empty adjacent gate · file_missing prune · UTF-8 요약  
 2. **E2E** Case A~F (신규 / replay 개선 / Exact append / empty gate / file_missing / no-op)  
 3. (이후·병렬) Legacy 백필 · Similar enforce 운영 점검  
@@ -394,4 +397,4 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | 1.0 | 초기 Phase 0~5 |
 | 1.1 | parser 우선·이력·개인정보·0.5·서버 exact/GPT·similar 그룹 |
 | 1.2 | **공용 photos+방별 chats 확정**, **파일명 시각 매칭 주 경로**, ESENCIA golden, Phase 1 완료=해당 테스트 통과, 계획서 재정리 |
-| **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착(덮어쓰기 아님)·same-source replace-if-richer. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |
+| **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착·fill + sns append. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |

@@ -90,28 +90,63 @@ def classify_upload_requests(
     """
     upload 전 분류 — empty_adjacent / file_missing / ready.
     [변경사유]: Phase 3.5 P2·P3 — 게이트·요약용
+    [변경사유]: Phase 4.2+ — 묶음 sub_file_rels 도 파일 존재 검사
     """
     photos_root = root / "photos"
     empty_adjacent: list[dict[str, Any]] = []
     file_missing: list[dict[str, Any]] = []
     ready: list[dict[str, Any]] = []
 
+    def _resolve_file(rel: str) -> Path | None:
+        rel_n = str(rel or "").replace("\\", "/")
+        candidates = [root / rel_n, photos_root / Path(rel_n).name]
+        return next((p for p in candidates if p.is_file()), None)
+
     for req_payload in requests:
         rel = str(req_payload.get("file_rel") or "").replace("\\", "/")
-        candidates = [root / rel, photos_root / Path(rel).name]
-        file_path = next((p for p in candidates if p.is_file()), None)
+        file_path = _resolve_file(rel)
+        sub_rels = [
+            str(r).replace("\\", "/")
+            for r in (req_payload.get("sub_file_rels") or [])
+            if r
+        ]
+        sub_paths: list[str] = []
         meta = {
             "rel": rel,
             "local_item_id": (req_payload.get("item") or {}).get("local_item_id"),
             "sha_prefix": str((req_payload.get("item") or {}).get("sha256") or "")[:12],
+            "sub_count": len(sub_rels),
         }
         if file_path is None:
             file_missing.append(meta)
             continue
-        if not matched_messages_nonempty(req_payload):
-            empty_adjacent.append({**meta, "file_path": str(file_path)})
+        missing_sub = False
+        for srel in sub_rels:
+            sp = _resolve_file(srel)
+            if sp is None:
+                file_missing.append({**meta, "rel": srel, "bundle_main_rel": rel})
+                missing_sub = True
+                break
+            sub_paths.append(str(sp))
+        if missing_sub:
             continue
-        ready.append({**meta, "file_path": str(file_path), "payload": req_payload})
+        if not matched_messages_nonempty(req_payload):
+            empty_adjacent.append(
+                {
+                    **meta,
+                    "file_path": str(file_path),
+                    "sub_file_paths": sub_paths,
+                }
+            )
+            continue
+        ready.append(
+            {
+                **meta,
+                "file_path": str(file_path),
+                "sub_file_paths": sub_paths,
+                "payload": req_payload,
+            }
+        )
 
     return {
         "empty_adjacent": empty_adjacent,
@@ -220,15 +255,16 @@ def upload_one(
     file_path: Path,
     cookie: str,
     timeout_sec: int = 60,
+    sub_file_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
-    """단건 multipart 업로드 (stdlib only)."""
+    """단건 multipart 업로드 (stdlib only). 묶음이면 sub_0… 추가."""
     import uuid
 
     boundary = f"----kakaoImport{uuid.uuid4().hex}"
     body_payload = {
         k: v
         for k, v in payload.items()
-        if k not in ("file_rel", "file_name")
+        if k not in ("file_rel", "file_name", "sub_file_rels", "sub_file_names", "bundle")
     }
     payload_bytes = json.dumps(body_payload, ensure_ascii=False).encode("utf-8")
     file_bytes = file_path.read_bytes()
@@ -254,6 +290,21 @@ def upload_one(
         + file_bytes
         + b"\r\n"
     )
+    # [변경사유]: Phase 4.2+ — main 외 sub_i 필드
+    for i, sub_path in enumerate(sub_file_paths or []):
+        if not sub_path.is_file():
+            continue
+        sub_bytes = sub_path.read_bytes()
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="sub_{i}"; '
+                f'filename="{sub_path.name}"\r\n'
+                f"Content-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+            + sub_bytes
+            + b"\r\n"
+        )
     parts.append(f"--{boundary}--\r\n".encode())
     body = b"".join(parts)
 
@@ -269,9 +320,10 @@ def upload_one(
         },
     )
     log.info(
-        "upload_one sha_prefix=%s file=%s",
+        "upload_one sha_prefix=%s file=%s subs=%s",
         str(body_payload.get("item", {}).get("sha256", ""))[:12],
         file_path.name,
+        len(sub_file_paths or []),
     )
     try:
         with urlopen(req, timeout=timeout_sec) as resp:
@@ -352,6 +404,10 @@ def cmd_upload(
             "similar_deferred_groups": similar_deferred_groups,
             "grouped_photo_candidates": list(
                 manifest.get("grouped_photo_candidates") or []
+            ),
+            "bundled_groups": list(manifest.get("bundled_groups") or []),
+            "bundle_collapsed_count": int(
+                manifest.get("bundle_collapsed_count") or 0
             ),
             # [변경사유]: dry-run은 payload 본문 제외 — 경로·id만
             "ready_rels": [r.get("rel") for r in classified["ready"]],
@@ -481,7 +537,14 @@ def cmd_upload(
         if not fp.is_file():
             results.append({"ok": False, "error": "file_missing", "rel": rel})
             continue
-        upload_queue.append({**ea, "payload": req, "file_path": str(fp)})
+        upload_queue.append(
+            {
+                **ea,
+                "payload": req,
+                "file_path": str(fp),
+                "sub_file_paths": list(ea.get("sub_file_paths") or []),
+            }
+        )
 
     log.info(
         "upload pace sleep_sec=%s ocr_extra_sec=%s queue=%s",
@@ -492,6 +555,7 @@ def cmd_upload(
     for idx, entry in enumerate(upload_queue):
         req_payload = entry["payload"]
         file_path = Path(entry["file_path"])
+        sub_paths = [Path(p) for p in (entry.get("sub_file_paths") or [])]
         rel = str(entry.get("rel") or "")
         try:
             sz = file_path.stat().st_size
@@ -512,6 +576,32 @@ def cmd_upload(
                 }
             )
             continue
+        # [변경사유]: Phase 4.2+ — sub 도 파일별 ingress 검사
+        oversized_sub = False
+        for sp in sub_paths:
+            try:
+                ssz = sp.stat().st_size
+            except OSError:
+                ssz = -1
+            if exceeds_ingress_limit(ssz):
+                log.warning(
+                    "skip upload oversized sub rel=%s bytes=%s",
+                    sp.name,
+                    ssz,
+                )
+                results.append(
+                    {
+                        "ok": False,
+                        "error": "FILE_EXCEEDS_INGRESS_LIMIT",
+                        "rel": str(sp),
+                        "bundle_main_rel": rel,
+                        "bytes": ssz,
+                    }
+                )
+                oversized_sub = True
+                break
+        if oversized_sub:
+            continue
         resp: dict[str, Any] | None = None
         try:
             resp = upload_one(
@@ -519,8 +609,16 @@ def cmd_upload(
                 payload=req_payload,
                 file_path=file_path,
                 cookie=cookie,
+                sub_file_paths=sub_paths,
             )
-            results.append({"ok": True, "rel": rel, "response": resp})
+            results.append(
+                {
+                    "ok": True,
+                    "rel": rel,
+                    "sub_count": len(sub_paths),
+                    "response": resp,
+                }
+            )
         except Exception as e:  # noqa: BLE001 — 배치 계속
             results.append({"ok": False, "error": str(e), "rel": rel})
 
@@ -562,6 +660,8 @@ def cmd_upload(
         "similar_skipped": similar_skipped,
         "similar_deferred_groups": similar_deferred_groups,
         "grouped_photo_candidates": list(manifest.get("grouped_photo_candidates") or []),
+        "bundled_groups": list(manifest.get("bundled_groups") or []),
+        "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
     }
     write_upload_result_json(result_path, detail)
     log.info(

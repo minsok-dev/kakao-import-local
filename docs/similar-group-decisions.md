@@ -120,51 +120,23 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 - `similar_policy.deferred_groups`
 - `grouped_photo_candidates` (동일 시간대·동일 발신자 묶음 사진의 향후 main+sub 후보 메타)
 
-## 추가 검토 요구 — 동일 시간대·동일 발신자 사진 그룹의 1콘텐츠 등록
+## 묶음 사진 → main+sub (Phase 4.2+)
 
-<!-- [변경사유]: 2026-08-04 — 운영 요청. 카카오 앨범/연속 사진을 하나의 콘텐츠(main+sub)로 등록하는 후속 요구 기록 -->
+<!-- [변경사유]: 2026-08-05 — C+Y 확정 구현. similar와 축 분리 -->
 
-현재 Phase 4 계약은 **similar 그룹의 업로드 제어**에 초점이 있다.  
-즉, 대표 1장만 올릴지 / 전부 올릴지 / 부분 서브그룹으로 볼지를 정하지만,
-**여러 사진을 하나의 콘텐츠의 main+sub 포스터 세트로 자동 등록하는 규칙은 아직 없다.**
+채팅 매칭 `image_group`(`photo`/`photo_multi`, `slot_count≥2`)만 묶음 등록한다.  
+similar `same_content`는 **업로드 대표 1장**이며 main+sub 등록과 무관하다.
 
-대표 사례:
+| 규칙 | 내용 |
+|------|------|
+| 시점 | similar policy **이후** 큐에서 `group_id` 붕괴 |
+| 대표 | 남은 멤버 중 `slot_index` 최소 |
+| 불일치 Y | 슬롯 N · 파일 M≥2 → 있는 장만 묶음; M=1 → 단건 |
+| 상한 | 멤버 5 (main+4 sub) |
+| payload | `item.sub_images[{sha256,rel_path}]` · multipart `file`+`sub_i` |
+| exact | main만 기존 C/D/E/F; 신규 OCR(`ocr_queued`)일 때만 sub 첨부 |
 
-```text
-[달콩, Dalkong] [오후 1:23] 사진
-[달콩, Dalkong] [오후 1:23] 사진
-[달콩, Dalkong] [오후 1:23] 사진
-[달콩, Dalkong] [오후 1:23] [CASE-B] 화요 바차타 특강 안내
-```
-
-현재 해석:
-
-- matcher: **사진 슬롯 3개 + 후속 설명 1개**
-- upload: 사진 **개별 단위**
-- similar: 유사 그룹이면 별도 decision 저장 가능
-- 결과: 로컬 파일 수가 1장뿐이면 count mismatch로 대표 1장에 설명이 자동 귀속되지 않을 수 있음
-
-후속 요구(미구현):
-
-```text
-동일 발신자 + 동일 시간대(예: 같은 분) + 연속 사진/사진 N장
-→ 1개 콘텐츠 그룹 후보
-→ 대표(main) 1장 + sub 나머지
-→ 후속 텍스트는 그룹 공통 설명으로 저장
-```
-
-이 요구가 들어가면 정해야 할 것:
-
-1. **그룹 경계:** 같은 분 / tolerance / 같은 발신자 / 다른 방 충돌 시 처리
-2. **대표 선택:** 첫 장·수동 지정·해상도 기준 등
-3. **sub 포스터 연결:** 서버 `content`/`ocr` main/sub 구조와의 매핑
-4. **텍스트 저장 위치:** 대표만 저장 vs 그룹 메타 별도 보존
-5. **슬롯 수 불일치:** `사진 3장`인데 로컬이 1장/2장만 있을 때 review 정책
-6. **Similar decision과의 관계:** `same_content`가 업로드 대표 1장을 뜻하는지, 또는 1콘텐츠 main+sub 등록까지 포함하는지 재정의 필요
-
-**결론:** 이 요구는 단순 upload policy를 넘어  
-**매칭 + payload + 서버 등록(main/sub)** 규칙 변경이므로, 이번 4.2에서는
-`grouped_photo_candidates` 메타만 로컬 결과에 남기고, **서버 main/sub 자동 등록은 아직 하지 않는다.**
+대표 사례(달콩 1:23 사진×3 + 설명)는 matcher 슬롯 묶음 → 업로드 1건(main+subs) + caption은 main `matched_messages`.
 
 ## 하지 않음 (명시)
 
@@ -207,4 +179,7 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 decision/서브그룹 저장은 upload 큐·파일 삭제·자동 병합을 수행하지 않음.  
 <!-- [변경사유]: Phase 4.2 완료 상태 반영 -->
 **Phase 4.2:** upload policy 기반 큐 필터 + `deferred` 기본 차단 + 결과 JSON 노출 ✅  
-묶음 사진은 `grouped_photo_candidates` 메타만 준비했고, 서버 main/sub 자동 등록은 후속.
+<!-- [변경사유]: Phase 4.2+ — 채팅 매칭 묶음 main+sub 서버 연동 -->
+**Phase 4.2+:** 채팅 매칭 묶음(`image_group`) → 1 OCR main+sub 서버 등록 ✅  
+- 트리거: similar 이후 `group_id` 클러스터 ≥2 · similar `same_content`는 대표 1장 유지  
+- 불일치: 있는 장만 묶음 · 상한 5장 · exact(SNS/hold) 시 sub 미첨부

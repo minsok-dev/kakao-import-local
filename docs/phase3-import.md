@@ -63,9 +63,11 @@ kakao-import upload --no-dry-run --limit N --endpoint $KAKAO_IMPORT_ENDPOINT
 
 - `KAKAO_IMPORT_SESSION_COOKIE` (파일 저장 금지)
 - payload part에 `Content-Type: application/json` **넣지 않음** (formidable maxFiles 오인 방지)
-- **파일 상한**: 수신(ingress) **50MiB**. 초과 시 로컬 `FILE_EXCEEDS_INGRESS_LIMIT` / 서버 413.
+- **파일 상한**: 수신(ingress) **50MiB/파일**. 초과 시 로컬 `FILE_EXCEEDS_INGRESS_LIMIT` / 서버 413.
+- <!-- [변경사유]: Phase 4.2+ 묶음 main+sub -->
+  **묶음(4.2+)**: `item.sub_images` + multipart `file`(main) + `sub_0`… (최대 5장). Nginx `client_max_body_size`는 다장 total에 맞게 **≥60m** 유지.
 - **선최적화(Pillow) 없음** — 원본 전송 후 서버가 크롤과 동일 `optimizeIngestImageBuffer` 적용.
-- SHA: 로컬·payload = **원본** SHA(무결성). exact/OCR = 서버 **최적화 후** SHA.
+- SHA: 로컬·payload = **원본** SHA(무결성). exact/OCR = 서버 **최적화 후** SHA. main exact(SNS/hold) 시 sub는 미첨부.
 
 ### 운영(스테이징/상용) — Nginx 등 앞단
 

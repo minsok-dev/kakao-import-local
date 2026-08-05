@@ -348,7 +348,8 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
   <!-- [변경사유]: Phase 4.1 — 로컬 `similar-review` 썸네일 UI(decision only) 제공 -->
   - **4.1:** `kakao-import similar-review` — 로컬 브라우저 썸네일 + decision + **partial 서브그룹** (upload 미적용)  
   - **4.2:** upload policy로 큐 반영 + dry-run/result JSON 사유 노출 ✅  
-  - **4.2+:** grouped-photo main/sub 서버 연동은 후속 판단
+  <!-- [변경사유]: Phase 4.2+ 구현 — 채팅 매칭 묶음 main+sub -->
+  - **4.2+:** 채팅 `image_group` 묶음 → 서버 1 OCR main+sub ✅ (similar는 대표 1장 유지 · 불일치 시 있는 장만 · 상한 5 · exact 시 sub 미첨부)
 - similar **자동 병합·자동 삭제 없음**  
 - 서버 Similar hold가 이미 있으므로, 로컬 similar는 **배치 안 정리·운영 보조** (서비스 전체 중복 방지 본경로 아님)
 
@@ -395,12 +396,10 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 6. **개수 불일치:** 채팅 슬롯 수 ≠ 로컬 파일 수일 때 보수적으로 review 또는 partial 처리
 7. **Similar/Exact와 충돌:** 같은 콘텐츠 그룹화와 similar decision, exact reuse 간 우선순위 정리 필요
 
-**현재 4.2 반영 범위:**  
-- 로컬 payload/manifest 에 `grouped_photo_candidates` 메타를 남긴다.
-- 같은 묶음 사진이라도 서버에는 아직 **대표+sub 자동 등록하지 않는다**.
-
-**판단:** 이 요구는 upload policy를 넘어  
-**매칭·payload·서버 콘텐츠 연결(main/sub)** 규칙까지 바뀌므로 후속 설계/구현 범위로 유지한다.
+**4.2+ 반영 범위:**  
+- similar 이후 채팅 매칭 그룹을 1 upload request(main+`sub_images`)로 붕괴.
+- 서버 `/api/admin/ingest/import/kakao` multipart 다장 → OCR `sub_poster_urls` + media job.
+- exact/SNS/hold 경로에서는 main만 처리(sub 미첨부).
 
 → [similar-group-decisions.md](./similar-group-decisions.md)
 
@@ -437,10 +436,9 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 
 ## 8. 즉시 다음 액션
 
-1. **Phase 4.2** 실데이터 검증: `same_content` / `different_content` / `partial` / `deferred` dry-run 확인
-2. grouped-photo 를 실제 서버 main/sub 등록으로 확장할지 결정
-3. (병렬) Legacy 백필 · Similar enforce 운영 점검
-4. 필요 시 Phase 4.2+ 후속 설계 문서화
+1. **Phase 4.2+** dry-run·스테이징: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md)
+2. (병렬) Legacy 백필 · Similar enforce 운영 점검
+3. Phase 1.5 watcher · Phase 5 제한 자동 승인
 
 ---
 
@@ -453,3 +451,4 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | 1.2 | **공용 photos+방별 chats 확정**, **파일명 시각 매칭 주 경로**, ESENCIA golden, Phase 1 완료=해당 테스트 통과, 계획서 재정리 |
 | **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착·fill + sns append. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |
 | **1.4** | **Phase 4.2 반영**. similar decision 기반 upload 후보 필터, `deferred` 기본 차단, dry-run/result 사유 노출, `grouped_photo_candidates` 메타 추가 |
+| **1.5** | **Phase 4.2+**. 채팅 매칭 묶음 → 서버 main+sub 1 OCR (C+Y, 상한 5, exact 시 sub 미첨부) |

@@ -1,4 +1,5 @@
 # [변경사유]: Phase3 — Import payload 생성 (인접/merged 메시지만, 절대경로 금지)
+# [변경사유]: Phase 4.2+ — similar 이후 채팅 매칭 묶음을 main+sub_images 1 request로 붕괴
 """서버 Import용 payload 빌더."""
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ log = get_logger(__name__)
 MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
 # [변경사유]: 예전 15MiB 하드 스킵 제거 확인용 (회귀 테스트)
 LEGACY_HARD_SKIP_BYTES = 15 * 1024 * 1024
+# [변경사유]: Phase 4.2+ — Nginx total body · 서버 maxFiles 와 맞춤 (main+4 sub)
+MAX_BUNDLE_MEMBERS = 5
 
 
 def exceeds_ingress_limit(byte_size: int) -> bool:
@@ -45,6 +48,13 @@ def ensure_client_instance_id() -> str:
 
 def _idempotency_key(client_id: str, sha256: str, local_item_id: str) -> str:
     raw = f"{client_id}|{sha256}|{local_item_id}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _bundle_idempotency_key(client_id: str, member_shas: list[str]) -> str:
+    """묶음 멤버 SHA 집합이 같으면 동일 멱등키."""
+    joined = "|".join(sorted(s.lower() for s in member_shas))
+    raw = f"{client_id}|bundle|{joined}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -140,7 +150,7 @@ def _load_grouped_photo_shape(
     conn,
     photo_ids: list[int],
 ) -> dict[int, dict[str, Any]]:
-    """동일 시각대 매칭 그룹 메타(향후 main+sub 후보 구조 준비)."""
+    """채팅 매칭 그룹 메타 — slot_count≥2 이면 묶음(main+sub) 후보."""
     if not photo_ids:
         return {}
     placeholders = ",".join("?" for _ in photo_ids)
@@ -251,6 +261,121 @@ def _apply_similar_policy(
         "deferred_groups": sorted(
             deferred_groups.values(), key=lambda x: int(x["group_id"])
         ),
+    }
+
+
+def collapse_grouped_photo_bundles(
+    items: list[dict[str, Any]],
+    *,
+    client_id: str,
+    max_members: int = MAX_BUNDLE_MEMBERS,
+) -> dict[str, Any]:
+    """
+    similar policy 이후 — 같은 채팅 group_id 로 ≥2장이면 1 request(main+sub)로 붕괴.
+    [변경사유]: Phase 4.2+ C+Y — similar는 이미 필터됨. slot_index 최소=main.
+    """
+    singles: list[dict[str, Any]] = []
+    by_group: dict[int, list[dict[str, Any]]] = {}
+
+    for item in items:
+        meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+        gc = meta.get("group_candidate") if isinstance(meta.get("group_candidate"), dict) else None
+        if not gc or not gc.get("bundle_candidate"):
+            singles.append(item)
+            continue
+        gid = int(gc.get("group_id") or 0)
+        if gid <= 0:
+            singles.append(item)
+            continue
+        by_group.setdefault(gid, []).append(item)
+
+    out: list[dict[str, Any]] = list(singles)
+    bundled_groups: list[dict[str, Any]] = []
+    collapsed = 0
+
+    for gid, members in sorted(by_group.items(), key=lambda x: x[0]):
+        if len(members) < 2:
+            out.extend(members)
+            continue
+
+        def _slot(it: dict[str, Any]) -> int:
+            m = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
+            gc = m.get("group_candidate") if isinstance(m.get("group_candidate"), dict) else {}
+            return int(gc.get("slot_index") or 0)
+
+        ordered = sorted(members, key=_slot)
+        if len(ordered) > max_members:
+            log.warning(
+                "bundle truncate group_id=%s kept=%s dropped=%s max=%s",
+                gid,
+                max_members,
+                len(ordered) - max_members,
+                max_members,
+            )
+            ordered = ordered[:max_members]
+
+        main = ordered[0]
+        subs = ordered[1:]
+        main_meta = main.get("_meta") if isinstance(main.get("_meta"), dict) else {}
+        gc0 = (
+            main_meta.get("group_candidate")
+            if isinstance(main_meta.get("group_candidate"), dict)
+            else {}
+        )
+        member_shas = [str(main.get("sha256") or "").lower()] + [
+            str(s.get("sha256") or "").lower() for s in subs
+        ]
+        member_photo_ids = [int(main_meta.get("photo_id") or 0)] + [
+            int((s.get("_meta") or {}).get("photo_id") or 0) for s in subs
+        ]
+        sub_images = [
+            {
+                "sha256": str(s.get("sha256") or "").lower(),
+                "rel_path": str(s.get("rel_path") or "").replace("\\", "/"),
+            }
+            for s in subs
+        ]
+        main["sub_images"] = sub_images
+        main_meta["idempotency_key"] = _bundle_idempotency_key(client_id, member_shas)
+        main_meta["bundle"] = {
+            "group_id": gid,
+            "group_key": str(gc0.get("group_key") or ""),
+            "slot_count_chat": int(gc0.get("slot_count") or 0),
+            "member_photo_ids": member_photo_ids,
+            "main_photo_id": int(main_meta.get("photo_id") or 0),
+            "member_count": len(ordered),
+        }
+        main_meta["sub_file_names"] = [
+            str(
+                (s.get("_meta") or {}).get("file_name")
+                or Path(str(s.get("rel_path") or "")).name
+            )
+            for s in subs
+        ]
+        out.append(main)
+        collapsed += len(subs)
+        bundled_groups.append(
+            {
+                "group_id": gid,
+                "group_key": str(gc0.get("group_key") or ""),
+                "slot_count_chat": int(gc0.get("slot_count") or 0),
+                "member_photo_ids": member_photo_ids,
+                "main_photo_id": int(main_meta.get("photo_id") or 0),
+                "member_count": len(ordered),
+                "sub_count": len(subs),
+            }
+        )
+        log.info(
+            "bundle collapse group_id=%s members=%s main_photo=%s",
+            gid,
+            len(ordered),
+            main_meta.get("photo_id"),
+        )
+
+    return {
+        "items": out,
+        "bundled_groups": bundled_groups,
+        "bundle_collapsed_count": collapsed,
     }
 
 
@@ -422,6 +547,9 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                 meta["group_candidate"] = grouped_map[pid]
         policy_result = _apply_similar_policy(items, similar_map)
         items = policy_result["items"]
+        # [변경사유]: Phase 4.2+ — similar 필터 후 채팅 묶음 붕괴 (limit 전에 적용)
+        bundle_result = collapse_grouped_photo_bundles(items, client_id=client_id)
+        items = bundle_result["items"]
         if limit is not None and len(items) > limit:
             items = items[:limit]
 
@@ -439,6 +567,8 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                     "bundle_candidate"
                 )
             ],
+            "bundled_groups": bundle_result["bundled_groups"],
+            "bundle_collapsed_count": bundle_result["bundle_collapsed_count"],
         }
 
     log.info("build_upload_items count=%s", len(items))
@@ -459,19 +589,28 @@ def build_batch_manifest(
     requests: list[dict[str, Any]] = []
     for it in items:
         meta = it.pop("_meta")
-        requests.append(
-            {
-                "source": "kakao_local",
-                "client_instance_id": client_id,
-                "idempotency_key": meta["idempotency_key"],
-                "batch_id": batch_id,
-                "room_key": room_key,
-                "auto_register": False,
-                "item": it,
-                "file_rel": it["rel_path"],
-                "file_name": meta.get("file_name"),
-            }
-        )
+        sub_rels = [
+            str(s.get("rel_path") or "").replace("\\", "/")
+            for s in (it.get("sub_images") or [])
+            if isinstance(s, dict)
+        ]
+        req: dict[str, Any] = {
+            "source": "kakao_local",
+            "client_instance_id": client_id,
+            "idempotency_key": meta["idempotency_key"],
+            "batch_id": batch_id,
+            "room_key": room_key,
+            "auto_register": False,
+            "item": it,
+            "file_rel": it["rel_path"],
+            "file_name": meta.get("file_name"),
+        }
+        if sub_rels:
+            req["sub_file_rels"] = sub_rels
+            req["sub_file_names"] = list(meta.get("sub_file_names") or [])
+            if meta.get("bundle"):
+                req["bundle"] = meta["bundle"]
+        requests.append(req)
     return {
         "source": "kakao_local",
         "client_instance_id": client_id,
@@ -484,6 +623,8 @@ def build_batch_manifest(
             "deferred_groups": list(policy_info.get("deferred_groups") or []),
         },
         "grouped_photo_candidates": list(policy_info.get("grouped_candidates") or []),
+        "bundled_groups": list(policy_info.get("bundled_groups") or []),
+        "bundle_collapsed_count": int(policy_info.get("bundle_collapsed_count") or 0),
     }
 
 

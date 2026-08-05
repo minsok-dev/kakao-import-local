@@ -117,7 +117,12 @@ decision: `same_content` / `different_content` / `partial` / `deferred` (upload 
 - `different_content`: 전원 후보 유지
 - `partial`: subgroup 대표 + singleton만 후보 유지
 - `deferred`: dry-run / upload 모두 기본 차단
-- 묶음 사진(main+sub)은 아직 서버 payload 계약으로 승격하지 않았고, 로컬 manifest 에서만 `grouped_photo_candidates` 메타로 보조 노출
+<!-- [변경사유]: Phase 4.2+ — 채팅 매칭 묶음 → 서버 main+sub 1 OCR -->
+- **묶음 사진(4.2+)**: similar 적용 **후** 채팅 `image_group`(`slot_count≥2`)에서 남은 파일이 ≥2장이면 **1 request = main + sub_images**
+  - similar `same_content` ≠ main+sub (similar는 대표 1장 유지)
+  - 슬롯 N · 로컬 M(M≥2, M&lt;N) → **있는 장만** 묶음 (Y)
+  - 멤버 상한 **5** (main+4 sub); exact 경로(SNS/hold)에서는 main만 처리·sub 미첨부
+  - payload: `item.sub_images: [{ sha256, rel_path }]` · multipart `file` + `sub_0`…
 
 ## 8. 로그
 

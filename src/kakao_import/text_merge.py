@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from kakao_import.normalize import normalize_for_compare
+from kakao_import.caption_sep import join_room_caption_blocks, join_texts_by_room
 
 MergeMode = Literal["safe", "balanced", "auto"]
 
@@ -26,7 +27,8 @@ class TextBundle:
     parts: list[dict[str, Any]] = field(default_factory=list)  # message_id, body_raw, body_norm, abs_time
 
     def joined_raw(self) -> str:
-        return "\n".join(p["body_raw"] for p in self.parts if p.get("body_raw"))
+        # [변경사유]: multi_room 캡션 — chat_id 바뀌면 ADD 구분선
+        return join_texts_by_room(self.parts)
 
     def joined_norm(self) -> str:
         return normalize_for_compare(self.joined_raw())
@@ -175,9 +177,20 @@ def merge_exact_texts(sha256: str, bundles: list[TextBundle], mode: MergeMode) -
             sources=sources,
         )
 
-    # balanced / auto — 고유 문장 병합 (auto여도 similar 자동통합 없음; exact만)
-    merged_lines = _unique_sentences([b.joined_raw() for b in bundles])
-    merged_text = "\n".join(merged_lines)
+    # balanced / auto — 번들별 본문을 구분선으로 연결 (방·멤버 경계 유지)
+    # [변경사유]: 줄 단위 unique flatten 은 multi_room 구분이 사라짐 → 블록 단위 + 구분선
+    block_texts: list[str] = []
+    seen_norms: set[str] = set()
+    for b in bundles:
+        raw = b.joined_raw().strip()
+        if not raw:
+            continue
+        key = normalize_for_compare(raw)
+        if key in seen_norms:
+            continue
+        seen_norms.add(key)
+        block_texts.append(raw)
+    merged_text = join_room_caption_blocks(block_texts)
     conflicts = detect_conflicts(bundles)
     review = len(conflicts) > 0
     decision = "review" if review else "merged"

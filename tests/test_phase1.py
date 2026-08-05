@@ -396,6 +396,7 @@ def test_match_preceding_text_over_2_minutes_skipped() -> None:
 
 
 def test_match_multi_room_conflict() -> None:
+    """같은 분·두 방 + 로컬 1장 → medium 배정 + multi_room review (포기 안 함)."""
     messages = [
         {
             "id": 1,
@@ -429,7 +430,76 @@ def test_match_multi_room_conflict() -> None:
         different_sender_grace_seconds=120,
         different_sender_max_chars=80,
     )
+    assigned = [a for a in out.assignments if a.confidence != "unmatched"]
+    assert len(assigned) == 1
+    assert assigned[0].photo_id == 1
+    assert assigned[0].confidence == "medium"
+    assert assigned[0].match_reason == "multi_room_caption_union"
     assert any("multi_room" in (r.get("reason") or "") for r in out.reviews)
+
+
+def test_match_multi_room_unions_captions_from_all_rooms() -> None:
+    """같은 분·두 방 서로 다른 캡션 → 로컬 1장에 양쪽 텍스트 message_id 모두 귀속."""
+    messages = [
+        {
+            "id": 10,
+            "chat_id": 77,
+            "seq": 1,
+            "msg_kind": "photo",
+            "sender": "Grey",
+            "abs_time": "2026-08-04T15:00:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+        {
+            "id": 11,
+            "chat_id": 77,
+            "seq": 2,
+            "msg_kind": "text",
+            "sender": "Grey",
+            "abs_time": "2026-08-04T15:00:00",
+            "body_raw": "BACHATA INFLUENCE room77",
+            "body_norm": "bachata influence room77",
+            "photo_count": None,
+        },
+        {
+            "id": 20,
+            "chat_id": 80,
+            "seq": 1,
+            "msg_kind": "photo",
+            "sender": "황성민",
+            "abs_time": "2026-08-04T15:00:00",
+            "body_raw": "사진",
+            "body_norm": "사진",
+            "photo_count": 1,
+        },
+        {
+            "id": 21,
+            "chat_id": 80,
+            "seq": 2,
+            "msg_kind": "text",
+            "sender": "황성민",
+            "abs_time": "2026-08-04T15:00:00",
+            "body_raw": "BACHATA INFLUENCE room80",
+            "body_norm": "bachata influence room80",
+            "photo_count": None,
+        },
+    ]
+    photos = [PhotoSlot(854, "p.png", datetime(2026, 8, 4, 15, 0, 17))]
+    out = match_photos_to_messages(
+        photos=photos,
+        messages=messages,
+        tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+    )
+    assigned = [a for a in out.assignments if a.confidence != "unmatched"]
+    assert len(assigned) == 1
+    gkey = assigned[0].group_key
+    msg_ids = {gt.message_id for gt in out.group_texts if gt.group_key == gkey}
+    assert msg_ids == {11, 21}
 
 
 def test_group_text_stops_on_other_sender() -> None:

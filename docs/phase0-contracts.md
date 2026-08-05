@@ -127,3 +127,20 @@ decision: `same_content` / `different_content` / `partial` / `deferred` (upload 
 ## 8. 로그
 
 `kakao_import.logging_util` — 본문 전체 덤프 금지.
+
+## 9. 매칭 — multi_room 같은 분 (캡션 합치기)
+
+<!-- [변경사유]: 2026-08-05 — 여러 방 동시 「사진」이어도 포기하지 않고 파일 1 + 전 방 캡션 union -->
+
+채팅 시각은 **분 단위**라 방 구분이 안 되고, 로컬 파일에는 방 정보가 없다.
+
+| 상황 | 정책 |
+|------|------|
+| 같은 분에 방 ≥2 + 로컬 후보 ≥1 | **배정 유지**(medium·review). 이유 `multi_room_caption_union` |
+| 캡션 | 그 분에 사진이 있던 **모든 방**의 앞/뒤 텍스트를 **같은 group에 add** (message_id 중복 제거) |
+| 방 구분 | 방이 바뀔 때 `\n\n<------------- ADD 구분선 ------------>\n\n` 삽입 (`caption_sep.py`) |
+| 방마다 설명이 거의 같음 | 업로드·text_merge 단계에서 동일 블록 중복 제거 |
+| 같은 분·서로 다른 포스터 + 로컬 1장 | 과다 귀속 가능 — review 표시. 누락보다 과다 우선 |
+
+하지 않음: 초로 “어느 방인지” 판별(채팅에 초 없음).  
+상세 구현: `src/kakao_import/matcher.py`

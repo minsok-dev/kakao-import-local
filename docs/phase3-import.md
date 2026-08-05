@@ -128,3 +128,8 @@ proxy_send_timeout 120s;
 **후속(선택):** 대역폭 절감용 `uploaded_sha_ledger` + caption-only(multipart 생략). 캡션 추가 자체와는 별개이며 **미구현**.
 
 운영 확인: 재전송 후 응답/로그에 exact SNS append · 서버에 해당 final SHA asset/포스터가 **남아 있어야** 함.
+
+### multi_room 같은 분
+
+같은 분에 여러 방 「사진」이 있어도 **매칭 포기하지 않음**. 로컬 파일 1장에 그 분 **모든 방** 캡션을 union (message_id 중복 제거).  
+계약: [phase0-contracts.md](./phase0-contracts.md) §9.

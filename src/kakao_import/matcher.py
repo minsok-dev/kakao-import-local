@@ -1,5 +1,6 @@
 # [변경사유]: Phase1 — 시각·개수·순서 matcher + image group + 후속 텍스트
 # [변경사유]: 선행 텍스트(≤2분) 귀속 + 슬롯/파일 수 불일치 시 부분 매칭·동일 group_text
+# [변경사유]: multi_room 같은 분 — 배정 유지 + 전 방 캡션 union (포기하지 않음)
 """사진↔메시지 매칭."""
 
 from __future__ import annotations
@@ -171,7 +172,13 @@ def match_photos_to_messages(
             review = True
             assign_n = 0
 
-            if multi_room:
+            # [변경사유]: multi_room이어도 후보 있으면 medium 배정 — 캡션은 전 방 union
+            if multi_room and len(candidates) > 0 and len(slots) > 0:
+                assign_n = min(len(candidates), len(slots))
+                confidence = "medium"
+                reason = "multi_room_caption_union"
+                review = True
+            elif multi_room:
                 reason = "multi_room_same_minute"
             elif len(candidates) == len(slots) and len(slots) > 0:
                 confidence = "high"
@@ -224,6 +231,8 @@ def match_photos_to_messages(
                     "candidate_count": len(candidates),
                     "assigned_count": assign_n,
                     "bundle_candidate": len(slots) >= 2,
+                    "multi_room": multi_room,
+                    "multi_room_count": len(rooms),
                 }
             )
 
@@ -244,32 +253,54 @@ def match_photos_to_messages(
                             group_key=group_key,
                         )
                     )
-                # 선행(≤2분) + 후속 텍스트 — 매칭된 전 파일이 같은 group_text 공유
-                _attach_group_texts(
-                    out,
-                    group_key=group_key,
-                    msgs=msgs,
-                    first_photo_seq=slots[0].seq,
-                    after_seq=slots[-1].seq,
-                    first_photo_time=slots[0].abs_time,
-                    last_photo_time=slots[-1].abs_time,
-                    photo_sender=slots[0].sender,
-                    before_max=timedelta(seconds=group_text_before_max_seconds),
-                    max_gap=timedelta(minutes=group_text_max_gap_minutes),
-                    diff_grace=timedelta(seconds=different_sender_grace_seconds),
-                    diff_max_chars=different_sender_max_chars,
-                )
-                if reason == "partial_count_order" or (
+                # [변경사유]: multi_room → 같은 분 모든 방 캡션 union / 아니면 해당 방만
+                if multi_room:
+                    _commit_group_texts_unique(
+                        out,
+                        group_key=group_key,
+                        links=_collect_minute_room_texts(
+                            by_chat=by_chat,
+                            minute=mk,
+                            group_key=group_key,
+                            before_max=timedelta(seconds=group_text_before_max_seconds),
+                            max_gap=timedelta(minutes=group_text_max_gap_minutes),
+                            diff_grace=timedelta(
+                                seconds=different_sender_grace_seconds
+                            ),
+                            diff_max_chars=different_sender_max_chars,
+                        ),
+                    )
+                else:
+                    _attach_group_texts(
+                        out,
+                        group_key=group_key,
+                        msgs=msgs,
+                        first_photo_seq=slots[0].seq,
+                        after_seq=slots[-1].seq,
+                        first_photo_time=slots[0].abs_time,
+                        last_photo_time=slots[-1].abs_time,
+                        photo_sender=slots[0].sender,
+                        before_max=timedelta(seconds=group_text_before_max_seconds),
+                        max_gap=timedelta(minutes=group_text_max_gap_minutes),
+                        diff_grace=timedelta(seconds=different_sender_grace_seconds),
+                        diff_max_chars=different_sender_max_chars,
+                    )
+                if reason in ("partial_count_order", "multi_room_caption_union") or (
                     assign_n < len(slots) or assign_n < len(candidates)
                 ):
                     out.reviews.append(
                         {
-                            "kind": "match_partial",
+                            "kind": (
+                                "match_multi_room_union"
+                                if reason == "multi_room_caption_union"
+                                else "match_partial"
+                            ),
                             "group_key": group_key,
                             "reason": reason,
                             "confidence": confidence,
                             "slots": len(slots),
                             "assigned": assign_n,
+                            "rooms": sorted(rooms),
                             "candidates": [p.rel_path for p in candidates[:20]],
                         }
                     )
@@ -333,11 +364,71 @@ def _unique_tolerance_photo(
     return None
 
 
-def _attach_group_texts(
+def _commit_group_texts_unique(
     out: MatchOutput,
     *,
     group_key: str,
+    links: list[GroupTextLink],
+) -> None:
+    """message_id 중복 제거 후 seq_in_group 재부여."""
+    seen: set[int] = {
+        gt.message_id for gt in out.group_texts if gt.group_key == group_key
+    }
+    seq = len(seen)
+    for link in links:
+        if link.message_id in seen:
+            continue
+        seen.add(link.message_id)
+        seq += 1
+        out.group_texts.append(
+            GroupTextLink(
+                group_key=group_key,
+                message_id=link.message_id,
+                seq_in_group=seq,
+            )
+        )
+
+
+def _collect_minute_room_texts(
+    *,
+    by_chat: dict[int, list[dict[str, Any]]],
+    minute: tuple,
+    group_key: str,
+    before_max: timedelta,
+    max_gap: timedelta,
+    diff_grace: timedelta,
+    diff_max_chars: int,
+) -> list[GroupTextLink]:
+    """같은 분에 사진이 있는 모든 방의 앞/뒤 텍스트를 모은다."""
+    collected: list[GroupTextLink] = []
+    for _cid, msgs in sorted(by_chat.items(), key=lambda x: x[0]):
+        for _anchor, slots in _photo_message_slots(msgs):
+            if not slots:
+                continue
+            if minute_key(slots[0].abs_time) != minute:
+                continue
+            collected.extend(
+                _collect_group_texts(
+                    msgs=msgs,
+                    group_key=group_key,
+                    first_photo_seq=slots[0].seq,
+                    after_seq=slots[-1].seq,
+                    first_photo_time=slots[0].abs_time,
+                    last_photo_time=slots[-1].abs_time,
+                    photo_sender=slots[0].sender,
+                    before_max=before_max,
+                    max_gap=max_gap,
+                    diff_grace=diff_grace,
+                    diff_max_chars=diff_max_chars,
+                )
+            )
+    return collected
+
+
+def _collect_group_texts(
+    *,
     msgs: list[dict[str, Any]],
+    group_key: str,
     first_photo_seq: int,
     after_seq: int,
     first_photo_time: datetime,
@@ -347,7 +438,7 @@ def _attach_group_texts(
     max_gap: timedelta,
     diff_grace: timedelta,
     diff_max_chars: int,
-) -> None:
+) -> list[GroupTextLink]:
     """
     사진 앞(≤before_max, 같은 sender) + 뒤(기존 max_gap) 설명 연결.
     순서는 앞→뒤. 매칭된 그룹 멤버가 동일 group_text를 공유한다.
@@ -420,4 +511,42 @@ def _attach_group_texts(
             )
         )
 
-    out.group_texts.extend(links)
+    return links
+
+
+def _attach_group_texts(
+    out: MatchOutput,
+    *,
+    group_key: str,
+    msgs: list[dict[str, Any]],
+    first_photo_seq: int,
+    after_seq: int,
+    first_photo_time: datetime,
+    last_photo_time: datetime,
+    photo_sender: str | None,
+    before_max: timedelta,
+    max_gap: timedelta,
+    diff_grace: timedelta,
+    diff_max_chars: int,
+) -> None:
+    """
+    사진 앞(≤before_max, 같은 sender) + 뒤(기존 max_gap) 설명 연결.
+    순서는 앞→뒤. 매칭된 그룹 멤버가 동일 group_text를 공유한다.
+    """
+    _commit_group_texts_unique(
+        out,
+        group_key=group_key,
+        links=_collect_group_texts(
+            msgs=msgs,
+            group_key=group_key,
+            first_photo_seq=first_photo_seq,
+            after_seq=after_seq,
+            first_photo_time=first_photo_time,
+            last_photo_time=last_photo_time,
+            photo_sender=photo_sender,
+            before_max=before_max,
+            max_gap=max_gap,
+            diff_grace=diff_grace,
+            diff_max_chars=diff_max_chars,
+        ),
+    )

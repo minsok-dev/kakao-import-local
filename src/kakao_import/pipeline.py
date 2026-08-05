@@ -371,7 +371,7 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
     bundle = TextBundle(photo_id=photo_id)
     rows = conn.execute(
         """
-        SELECT m.id AS message_id, m.body_raw, m.body_norm, m.abs_time, gt.seq_in_group
+        SELECT m.id AS message_id, m.chat_id, m.body_raw, m.body_norm, m.abs_time, gt.seq_in_group
         FROM photo_message_assignment a
         JOIN group_text gt ON gt.group_id = a.group_id
         JOIN parsed_message m ON m.id = gt.message_id
@@ -384,6 +384,7 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
         bundle.parts.append(
             {
                 "message_id": r["message_id"],
+                "chat_id": int(r["chat_id"]) if r["chat_id"] is not None else None,
                 "body_raw": r["body_raw"],
                 "body_norm": r["body_norm"],
                 "abs_time": r["abs_time"],

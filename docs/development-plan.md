@@ -436,9 +436,9 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 
 ## 8. 즉시 다음 액션
 
-1. **Phase 4.2+** dry-run·스테이징: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md)
+1. **Phase 4.2+** 검증: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md) — **2026-08-06 현재까지 오류 없음** (미관측: 멤버>5·50MiB만)
 2. (병렬) Legacy 백필 · Similar enforce 운영 점검
-3. Phase 1.5 watcher · Phase 5 제한 자동 승인
+3. (후속·선택) caption-only ledger · similar 서명 10MiB 완화 · Phase 1.5 watcher · Phase 5
 
 ---
 
@@ -452,3 +452,4 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | **1.3** | **Phase 3.5 운영 안정화 최우선**. caption 고착·fill + sns append. P2 gate·P3 file_missing·P4 UTF-8. Phase 4/1.5/5 보류 조건. Phase 1 상태 ✅ 정합 |
 | **1.4** | **Phase 4.2 반영**. similar decision 기반 upload 후보 필터, `deferred` 기본 차단, dry-run/result 사유 노출, `grouped_photo_candidates` 메타 추가 |
 | **1.5** | **Phase 4.2+**. 채팅 매칭 묶음 → 서버 main+sub 1 OCR (C+Y, 상한 5, exact 시 sub 미첨부) |
+| **1.6** | `_01` 파싱 · multi_room 캡션 union+ADD 구분선 · 터미널 한글 요약. 실데이터 검증 **현재까지 오류 없음** |

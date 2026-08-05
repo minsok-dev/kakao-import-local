@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from kakao_import.config import PROJECT_ROOT, Settings
+from kakao_import.caption_sep import join_texts_by_room
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.similar_policy import upload_policy_for_decision
@@ -481,9 +482,11 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                 text_relation = "same"
                 # [변경사유]: assignment 의 photo 메시지(body='사진')는 caption 후보에서 제외
                 #   설명은 group_text(text) 만 사용
+                # [변경사유]: multi_room — chat_id 바뀌면 ADD 구분선으로 한 본문에 합침
                 msgs = conn.execute(
                     """
-                    SELECT pm.abs_time AS abs_time, pm.body_raw AS body_raw, pm.msg_kind AS msg_kind
+                    SELECT pm.chat_id AS chat_id, pm.abs_time AS abs_time,
+                           pm.body_raw AS body_raw, pm.msg_kind AS msg_kind
                     FROM photo_message_assignment a
                     JOIN image_group ig ON ig.id = a.group_id
                     JOIN group_text gt ON gt.group_id = ig.id
@@ -494,21 +497,28 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                     """,
                     (photo_id,),
                 ).fetchall()
-                seen: set[str] = set()
+                parts: list[dict[str, Any]] = []
                 for m in msgs:
                     t = str(m["body_raw"] or "")
-                    at = str(m["abs_time"] or "")
                     if not t.strip() or is_attachment_marker_text(t):
                         continue
-                    fp = _fingerprint_message(at, t)
-                    if fp in seen:
-                        continue
-                    seen.add(fp)
+                    parts.append(
+                        {
+                            "chat_id": int(m["chat_id"])
+                            if m["chat_id"] is not None
+                            else None,
+                            "body_raw": t,
+                            "abs_time": str(m["abs_time"] or ""),
+                        }
+                    )
+                joined = join_texts_by_room(parts)
+                if joined:
+                    at0 = str(parts[0].get("abs_time") or "") if parts else ""
                     matched.append(
                         {
-                            "sent_at": at,
-                            "text": t,
-                            "message_fingerprint": fp,
+                            "sent_at": at0,
+                            "text": joined,
+                            "message_fingerprint": _fingerprint_message(at0, joined),
                         }
                     )
 

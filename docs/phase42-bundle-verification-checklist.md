@@ -14,9 +14,12 @@
 
 ## A. 로컬 dry-run
 
+전제(파일명): PC 앨범 `KakaoTalk_…_01.png` 등은 `photo_name` 파싱 후 `kakao-import run` 재실행 필요.
+재파싱 전 `name_parse_ok=0`이면 매칭·묶음에 안 들어감.
+
 - [ ] `kakao-import upload --dry-run` (또는 export-payload) 실행
 - [ ] `last_upload_manifest.json` / `upload-result.json`에 `bundled_groups`, `bundle_collapsed_count` 존재
-- [ ] 채팅 `사진`×N(N≥2) + 로컬 파일 ≥2 → request 1건, `item.sub_images` 길이 = N−1(또는 있는 장−1)
+- [ ] 채팅 `사진`×N(N≥2) + 로컬 파일 ≥2(본파일+`_01`…) → request 1건, `item.sub_images` 길이 = N−1(또는 있는 장−1)
 - [ ] main = `slot_index` 최소 사진의 `rel_path` / `sha256`
 - [ ] 슬롯 3 · 파일 2(Y) → 멤버 2로 묶임, 단건으로 쪼개지지 않음
 - [ ] 슬롯 ≥2 · 파일 1 → **단건** (묶음 아님)

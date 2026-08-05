@@ -187,6 +187,35 @@ def report_cmd(
         click.echo(f"review_pending={len(report.get('review_required') or [])}")
 
 
+def _echo_run_summary_ko(out: dict) -> None:
+    """
+    run 결과 한글 요약 (기존 OK run 줄은 유지한 채 아래에 추가).
+    [변경사유]: 터미널 가독성 — 줄바꿈 + 한글 라벨
+    """
+    scan = out.get("scan") or {}
+    parse = out.get("parse") or {}
+    match = out.get("match") or {}
+    hash_info = out.get("hash") or {}
+    merge = out.get("merge") or {}
+    conf = match.get("confidence") or {}
+    eg = (out.get("report") or {}).get("esencia_golden") or {}
+    lines = [
+        "----- run 요약 -----",
+        f"총 사진 수: {scan.get('photos', '?')}",
+        f"파싱 실패 사진: {scan.get('unparsed_photo', '?')}",
+        f"채팅방 수: {parse.get('rooms', '?')} / 메시지: {parse.get('messages', '?')}",
+        f"매칭 배정: {match.get('assignments', '?')}"
+        f" (high={conf.get('high', 0)}, unmatched={conf.get('unmatched', 0)})",
+        f"동일 사진(업로드 제외 장): {hash_info.get('excluded_from_upload', '?')}",
+        f"고유 SHA 그룹: {hash_info.get('exact_groups', '?')}",
+        f"텍스트 병합 collapse: {merge.get('collapse', '?')} / skipped: {merge.get('skipped', '?')}",
+        f"esencia_golden: {eg.get('passed')}",
+        "(앨범 묶음·업로드 컨텐츠 수는 upload --dry-run 요약 참고)",
+        "--------------------",
+    ]
+    upload_mod.echo_text_safe("\n".join(lines))
+
+
 @main.command("run")
 @click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
 @click.option("--json", "as_json", is_flag=True)
@@ -197,10 +226,12 @@ def run_cmd(ctx: click.Context, root: Path | None, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     else:
+        # [변경사유]: 기존 OK run 한 줄 형식 유지
         click.echo(f"OK run scan={out['scan']} parse={out['parse']}")
         click.echo(f"OK run match={out['match']} hash={out['hash']} merge={out.get('merge')}")
         eg = (out.get("report") or {}).get("esencia_golden") or {}
         click.echo(f"OK esencia_golden passed={eg.get('passed')}")
+        _echo_run_summary_ko(out)
 
 
 @main.command("status")

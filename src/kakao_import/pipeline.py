@@ -185,17 +185,20 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         conn.execute("DELETE FROM review_item")
 
         photos_rows = conn.execute(
-            "SELECT id, rel_path, name_time, name_parse_ok FROM photo_file"
+            "SELECT id, rel_path, file_name, name_time, name_parse_ok FROM photo_file"
         ).fetchall()
         photo_slots: list[PhotoSlot] = []
         for r in photos_rows:
             if not r["name_parse_ok"] or not r["name_time"]:
                 continue
+            # [변경사유]: DB에 seq 컬럼 없이 file_name 재파싱 — `_01` 정렬용
+            seq = parse_kakaotalk_filename(str(r["file_name"] or "")).sequence
             photo_slots.append(
                 PhotoSlot(
                     photo_id=int(r["id"]),
                     rel_path=r["rel_path"],
                     name_time=datetime.fromisoformat(r["name_time"]),
+                    name_seq=seq,
                 )
             )
 

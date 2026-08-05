@@ -18,6 +18,8 @@ class PhotoSlot:
     photo_id: int
     rel_path: str
     name_time: datetime
+    # [변경사유]: KakaoTalk `_01` 등 앨범 멤버 — name_time 동일 시 순서 보장
+    name_seq: int = 0
 
 
 @dataclass
@@ -133,7 +135,8 @@ def match_photos_to_messages(
     for p in photos_ok:
         photos_by_minute.setdefault(minute_key(p.name_time), []).append(p)
     for plist in photos_by_minute.values():
-        plist.sort(key=lambda x: x.name_time)
+        # [변경사유]: 동일 ms + `_01`/`_02` 는 sequence → photo_id 순
+        plist.sort(key=lambda x: (x.name_time, x.name_seq, x.photo_id))
 
     # 방별 사진 메시지 분 버킷 (충돌 감지)
     room_minutes: dict[tuple, set[int]] = {}

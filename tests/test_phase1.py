@@ -45,8 +45,16 @@ def test_photo_name_ms() -> None:
     p = parse_kakaotalk_filename("KakaoTalk_20260724_005030533.png")
     assert p.ok
     assert p.name_time == datetime(2026, 7, 24, 0, 50, 30, 533000)
+    assert p.sequence == 0
     p2 = parse_kakaotalk_filename("KakaoTalk_20260724_005034512.PNG")
-    assert p2.ok and p2.ext == "png"
+    assert p2.ok and p2.ext == "png" and p2.sequence == 0
+    # [변경사유]: PC 앨범 `_01`/`_02` — 동일 name_time + sequence
+    album = parse_kakaotalk_filename("KakaoTalk_20260804_161921080_01.png")
+    assert album.ok
+    assert album.name_time == datetime(2026, 8, 4, 16, 19, 21, 80000)
+    assert album.sequence == 1
+    album2 = parse_kakaotalk_filename("KakaoTalk_20260804_161921080_02.JPG")
+    assert album2.ok and album2.sequence == 2 and album2.ext == "jpg"
     bad = parse_kakaotalk_filename("random.jpg")
     assert not bad.ok and bad.error == "unparsed_photo"
 
@@ -147,6 +155,45 @@ def test_match_same_minute_order() -> None:
     assert highs[1].photo_id == 2 and highs[1].slot_index == 1
     assert not highs[0].review_required
     assert len(out.group_texts) >= 1
+
+
+def test_match_album_suffix_same_ms_orders_by_seq() -> None:
+    """동일 name_time + `_01` sequence → slot 0=본파일, slot 1=_01."""
+    t = datetime(2026, 8, 4, 16, 19, 21, 80000)
+    messages = [
+        {
+            "id": 1,
+            "chat_id": 1,
+            "seq": 1,
+            "msg_kind": "photo_multi",
+            "sender": "S",
+            "abs_time": "2026-08-04T16:19:00",
+            "body_raw": "사진 2장",
+            "body_norm": "사진 2장",
+            "photo_count": 2,
+        },
+    ]
+    # photo_id 역순으로 넣어도 name_seq로 정렬되어야 함
+    photos = [
+        PhotoSlot(861, "photos/a_01.png", t, name_seq=1),
+        PhotoSlot(860, "photos/a.png", t, name_seq=0),
+    ]
+    out = match_photos_to_messages(
+        photos=photos,
+        messages=messages,
+        tolerance_seconds=120,
+        group_text_max_gap_minutes=30,
+        different_sender_grace_seconds=120,
+        different_sender_max_chars=80,
+    )
+    highs = sorted(
+        [a for a in out.assignments if a.confidence == "high"],
+        key=lambda a: a.slot_index,
+    )
+    assert len(highs) == 2
+    assert highs[0].photo_id == 860 and highs[0].slot_index == 0
+    assert highs[1].photo_id == 861 and highs[1].slot_index == 1
+    assert len(out.groups) == 1 and int(out.groups[0]["slot_count"]) == 2
 
 
 def test_match_count_mismatch_partial_assigns_available() -> None:

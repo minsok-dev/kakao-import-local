@@ -108,3 +108,23 @@ proxy_send_timeout 120s;
 1. 신규 → OCR/GPT → 콘텐츠 자동 이관
 2. exact+콘텐츠 → SNS만 추가, OCR 목록에 hold 안 쌓임
 3. F만 `exact 확인` 필터에 표시
+
+---
+
+## 로컬 삭제 후 동일 이미지 재등장 (캡션 추가)
+
+<!-- [변경사유]: 2026-08-05 — photo_file 유지/caption-only 오해 정리. 서버 exact가 SSOT -->
+
+**지원 시나리오 (A):** 예전에 올린 파일이 로컬에서 지워졌다가 `photos/`에 **다시 생김** → `run` → `upload`  
+→ 서버가 **최적화 후 SHA**로 exact 판정 → 매칭 텍스트는 기존 SNS 캡션 append (`next=sns_appended` 등).
+
+| 구분 | 담당 | 비고 |
+|------|------|------|
+| 같은 배치 안 바이트 중복 | 로컬 `exact_sha_*` / `excluded_from_upload` | 대표 1장만 큐 |
+| “예전에 서버에 올렸음” | **서버** exact (`receiveKakaoImport` → `resolveExact`) | 로컬 DB 기억 불필요 |
+| 디스크에 없는 `photo_file` | `prune_missing_photo_files` | 행 유지 금지 (hash/upload 깨짐) |
+
+**비범위 (B):** 로컬 파일 없이 채팅 텍스트만으로 과거 SHA에 캡션 부착 — 어느 SHA인지 자동 구분 불가.  
+**후속(선택):** 대역폭 절감용 `uploaded_sha_ledger` + caption-only(multipart 생략). 캡션 추가 자체와는 별개이며 **미구현**.
+
+운영 확인: 재전송 후 응답/로그에 exact SNS append · 서버에 해당 final SHA asset/포스터가 **남아 있어야** 함.

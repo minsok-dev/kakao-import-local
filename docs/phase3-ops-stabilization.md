@@ -113,7 +113,9 @@ dry-run / 실 upload
 - upload 전 파일 존재 확인 (이미 있으면 유지)  
 - 없으면 `file_missing`으로 기록·스킵 (일반 `failed`와 구분)  
 - `hash`/`run` 시 없는 파일 **prune** 또는 재실행 시 **제외**  
-- SQLite 상태머신·서버 DB migration **불필요**
+- SQLite 상태머신·서버 DB migration **불필요**  
+- <!-- [변경사유]: 삭제 후 재등장은 prune 유지 + 서버 exact SNS. photo_file 억지 보존 금지 -->
+  삭제 후 같은 파일이 다시 오면 **재스캔·재업로드**하면 됨. “이미 올림” 판정·캡션 추가는 **서버 exact**가 담당. 없는 파일의 `photo_file` 행을 남겨 두지 말 것.
 
 ---
 
@@ -135,6 +137,7 @@ dry-run / 실 upload
 | Phase 5 자동 승인 | 목표가 자동 등록이 아니라 데이터 신뢰성 |
 | 카카오→`tbl_ingest_raw` 통합 | 후속 |
 | Exact/similar/신규 OCR 흐름 변경 | 회귀 금지 |
+| 로컬 caption-only / `uploaded_sha_ledger` | 대역폭 후속. 재등장 캡션은 서버 exact로 충분 ([phase3-import.md](./phase3-import.md)) |
 
 ---
 

@@ -198,10 +198,26 @@ def write_upload_result_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
+def echo_text_safe(text: str) -> None:
+    """
+    콘솔 출력. [변경사유]: cp949 환경에서 한글·이모지 UnicodeEncodeError 방지.
+    인코딩 불가 시 stdout.buffer에 UTF-8로 기록.
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        # 대상 인코딩으로 변환 가능하면 print
+        text.encode(enc)
+        print(text, flush=True)
+    except (UnicodeEncodeError, LookupError):
+        sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+
+
 def echo_summary_safe(summary: dict[str, Any]) -> None:
     """
     콘솔에 ASCII-safe 요약만 출력.
     [변경사유]: Phase 3.5 P4 — emoji/cp949 UnicodeEncodeError 방지
+    [변경사유]: 기존 한 줄 유지 + 한글 줄바꿈 요약 추가 (가독성)
     """
     line = (
         f"OK={summary.get('OK', 0)} "
@@ -215,11 +231,26 @@ def echo_summary_safe(summary: dict[str, Any]) -> None:
         f"dry_run={summary.get('dry_run')} "
         f"blocked={summary.get('blocked')}"
     )
-    try:
-        print(line, flush=True)
-    except UnicodeEncodeError:
-        sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
-        sys.stdout.buffer.flush()
+    echo_text_safe(line)
+
+    ready = int(summary.get("READY") or 0)
+    empty = int(summary.get("EMPTY_CONTEXT") or 0)
+    item_count = summary.get("item_count")
+    if item_count is None:
+        item_count = ready + empty
+    bundle_n = int(summary.get("bundle_collapsed_count") or 0)
+    # [변경사유]: 기존 OK=… 한 줄은 유지하고, 아래에 한글 해석만 추가
+    ko_lines = [
+        "----- 업로드 요약 -----",
+        f"총 업로드 컨텐츠 수: {item_count}",
+        f"  (캡션 있음 READY={ready} + 이미지만 EMPTY={empty})",
+        f"앨범 묶음(main+sub) 수: {bundle_n}",
+        f"유사(대표만) 스킵: {summary.get('SIMILAR_SKIPPED_REPRESENTATIVE', 0)}",
+        f"파일 없음: {summary.get('FILE_MISSING', 0)}",
+        f"dry_run={summary.get('dry_run')} blocked={summary.get('blocked')}",
+        "----------------------",
+    ]
+    echo_text_safe("\n".join(ko_lines))
 
 
 def cmd_export_payload(
@@ -427,6 +458,10 @@ def cmd_upload(
         return {
             **summary,
             "item_count": manifest["item_count"],
+            # [변경사유]: 콘솔 한글 요약용 — 기존 필드 유지 + 묶음 수 전달
+            "bundle_collapsed_count": int(
+                manifest.get("bundle_collapsed_count") or 0
+            ),
             "manifest": str(out),
             "batch_id": manifest["batch_id"],
             "result_json": str(result_path),
@@ -678,6 +713,8 @@ def cmd_upload(
     return {
         **summary,
         "item_count": len(results),
+        # [변경사유]: 콘솔 한글 요약용
+        "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
         "ok": ok_n,
         "fail": fail_n,
         "manifest": str(out),

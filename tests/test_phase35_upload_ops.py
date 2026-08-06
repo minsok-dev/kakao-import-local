@@ -190,7 +190,7 @@ def test_cmd_upload_blocks_deferred_similar_groups(tmp_path: Path) -> None:
         export_root=root,
         db_path=db,
         log_level="INFO",
-        match_tolerance_seconds=120,
+        match_tolerance_seconds=60,
         group_text_max_gap_minutes=30,
         different_sender_grace_seconds=120,
         different_sender_max_chars=80,

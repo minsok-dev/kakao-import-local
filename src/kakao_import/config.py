@@ -54,7 +54,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         export_root=export_root,
         db_path=db_path,
         log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
-        match_tolerance_seconds=int(os.getenv("MATCH_TOLERANCE_SECONDS") or "120"),
+        # [변경사유]: 운영 요청 — 이미지↔채팅 매칭 허용을 2분→1분으로 축소
+        match_tolerance_seconds=int(os.getenv("MATCH_TOLERANCE_SECONDS") or "60"),
         group_text_max_gap_minutes=int(os.getenv("GROUP_TEXT_MAX_GAP_MINUTES") or "30"),
         different_sender_grace_seconds=int(
             os.getenv("DIFFERENT_SENDER_GRACE_SECONDS") or "120"

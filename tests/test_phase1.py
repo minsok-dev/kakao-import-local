@@ -24,7 +24,7 @@ def _settings(tmp_path: Path, root: Path) -> Settings:
         export_root=root,
         db_path=tmp_path / "t.db",
         log_level="WARNING",
-        match_tolerance_seconds=120,
+        match_tolerance_seconds=60,
         group_text_max_gap_minutes=30,
         different_sender_grace_seconds=120,
         different_sender_max_chars=80,

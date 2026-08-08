@@ -436,9 +436,10 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 
 ## 8. 즉시 다음 액션
 
-1. **Phase 4.2+** 검증: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md) — **2026-08-06 현재까지 오류 없음** (미관측: 멤버>5·50MiB만)
-2. (병렬) Legacy 백필 · Similar enforce 운영 점검
-3. (후속·선택) caption-only ledger · similar 서명 10MiB 완화 · Phase 1.5 watcher · Phase 5
+1. **Exact SNS 병합 · F hold · DDL 015/016** — **상용 운영 중** (2026-08-09 운영자 확인). 문서 불일치 해소됨.
+2. **Phase 4.2+** 검증: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md) — **2026-08-06 현재까지 오류 없음** (미관측: 멤버>5·50MiB만)
+3. (병렬) Legacy 백필 · Similar enforce 운영 점검
+4. (후속·선택) caption-only ledger · similar 서명 10MiB 완화 · Phase 1.5 watcher · Phase 5
 
 ---
 
@@ -453,3 +454,4 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | **1.4** | **Phase 4.2 반영**. similar decision 기반 upload 후보 필터, `deferred` 기본 차단, dry-run/result 사유 노출, `grouped_photo_candidates` 메타 추가 |
 | **1.5** | **Phase 4.2+**. 채팅 매칭 묶음 → 서버 main+sub 1 OCR (C+Y, 상한 5, exact 시 sub 미첨부) |
 | **1.6** | `_01` 파싱 · multi_room 캡션 union+ADD 구분선 · 터미널 한글 요약. 실데이터 검증 **현재까지 오류 없음** |
+| **1.7** | Exact SNS·F hold·015/016 **상용 운영** 문서 동기화 (2026-08-09) |

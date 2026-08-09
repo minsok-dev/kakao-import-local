@@ -17,6 +17,7 @@ SCHEMA_SQL_P2 = PROJECT_ROOT / "sql" / "002_phase2_text_merge.sql"
 SCHEMA_SQL_P2B = PROJECT_ROOT / "sql" / "003_phase2_manual_undo.sql"
 SCHEMA_SQL_P4 = PROJECT_ROOT / "sql" / "004_phase4_similar_group.sql"
 SCHEMA_SQL_P41 = PROJECT_ROOT / "sql" / "005_phase41_partial_subgroup.sql"
+SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -96,6 +97,10 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         # [변경사유]: Phase 4.1 partial 서브그룹 컬럼 (기존 DB ALTER)
         log.info("init_schema sql=%s (guarded)", SCHEMA_SQL_P41.name)
         _apply_phase41_partial_columns(conn)
+        # [변경사유]: caption-only uploaded_sha_ledger
+        if SCHEMA_SQL_LEDGER.is_file():
+            log.info("init_schema sql=%s", SCHEMA_SQL_LEDGER.name)
+            conn.executescript(SCHEMA_SQL_LEDGER.read_text(encoding="utf-8"))
         conn.commit()
 
 

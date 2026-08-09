@@ -137,7 +137,7 @@ dry-run / 실 upload
 | Phase 5 자동 승인 | 목표가 자동 등록이 아니라 데이터 신뢰성 |
 | 카카오→`tbl_ingest_raw` 통합 | 후속 |
 | Exact/similar/신규 OCR 흐름 변경 | 회귀 금지 |
-| 로컬 caption-only / `uploaded_sha_ledger` | 대역폭 후속. 재등장 캡션은 서버 exact로 충분 ([phase3-import.md](./phase3-import.md)) |
+| 로컬 caption-only / `uploaded_sha_ledger` | ✅ 2026-08-09 — 성공 SHA 장부 + 파일 생략 SNS append |
 
 ---
 

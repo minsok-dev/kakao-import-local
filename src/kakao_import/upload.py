@@ -14,6 +14,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from kakao_import.config import Settings
+from kakao_import.ledger import (
+    forget_uploaded_sha,
+    is_uploaded_sha,
+    record_uploaded_sha,
+    response_ledger_fields,
+)
 from kakao_import.logging_util import get_logger
 from kakao_import.payload import (
     build_batch_manifest,
@@ -23,6 +29,25 @@ from kakao_import.payload import (
 )
 
 log = get_logger(__name__)
+
+# [변경사유]: caption-only 실패 시 파일 재전송
+CAPTION_ONLY_FALLBACK_CODES = frozenset(
+    {
+        "CAPTION_ONLY_NO_EXACT",
+        "CAPTION_ONLY_REQUIRES_FILE",
+        "MISSING_FILE",
+    }
+)
+
+
+class UploadHttpError(Exception):
+    """HTTP 오류 + 서버 code (caption-only fallback 용)."""
+
+    def __init__(self, status: int, code: str | None, preview: str):
+        super().__init__(f"HTTP {status} {code or preview[:80]}")
+        self.status = status
+        self.code = (code or "").strip() or None
+        self.preview = preview
 
 # [변경사유]: 실전송 배치가 similar 판정·OCR job 을 연속 유발 → 서비스 부하 완화용 기본 유휴
 #   요청 처리 시간(1~20s)과 별도로, 응답 후 대기. ocr_queued 는 워커 큐잉이 이어지므로 추가 대기.
@@ -287,8 +312,11 @@ def upload_one(
     cookie: str,
     timeout_sec: int = 60,
     sub_file_paths: list[Path] | None = None,
+    caption_only: bool = False,
 ) -> dict[str, Any]:
-    """단건 multipart 업로드 (stdlib only). 묶음이면 sub_0… 추가."""
+    """단건 multipart 업로드 (stdlib only). 묶음이면 sub_0… 추가.
+    [변경사유]: caption_only=True 이면 file/sub 생략 (ledger SHA 재사용)
+    """
     import uuid
 
     boundary = f"----kakaoImport{uuid.uuid4().hex}"
@@ -297,8 +325,14 @@ def upload_one(
         for k, v in payload.items()
         if k not in ("file_rel", "file_name", "sub_file_rels", "sub_file_names", "bundle")
     }
+    # [변경사유]: 서버가 파일 없이 exact SNS append 하도록 표시
+    if caption_only:
+        body_payload = {**body_payload, "caption_only": True}
+        item = body_payload.get("item")
+        if isinstance(item, dict) and item.get("sub_images"):
+            item = {**item, "sub_images": []}
+            body_payload = {**body_payload, "item": item}
     payload_bytes = json.dumps(body_payload, ensure_ascii=False).encode("utf-8")
-    file_bytes = file_path.read_bytes()
     filename = file_path.name
 
     parts: list[bytes] = []
@@ -312,30 +346,32 @@ def upload_one(
         + payload_bytes
         + b"\r\n"
     )
-    parts.append(
-        (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-            f"Content-Type: application/octet-stream\r\n\r\n"
-        ).encode()
-        + file_bytes
-        + b"\r\n"
-    )
-    # [변경사유]: Phase 4.2+ — main 외 sub_i 필드
-    for i, sub_path in enumerate(sub_file_paths or []):
-        if not sub_path.is_file():
-            continue
-        sub_bytes = sub_path.read_bytes()
+    if not caption_only:
+        file_bytes = file_path.read_bytes()
         parts.append(
             (
                 f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="sub_{i}"; '
-                f'filename="{sub_path.name}"\r\n'
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
                 f"Content-Type: application/octet-stream\r\n\r\n"
             ).encode()
-            + sub_bytes
+            + file_bytes
             + b"\r\n"
         )
+        # [변경사유]: Phase 4.2+ — main 외 sub_i 필드
+        for i, sub_path in enumerate(sub_file_paths or []):
+            if not sub_path.is_file():
+                continue
+            sub_bytes = sub_path.read_bytes()
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="sub_{i}"; '
+                    f'filename="{sub_path.name}"\r\n'
+                    f"Content-Type: application/octet-stream\r\n\r\n"
+                ).encode()
+                + sub_bytes
+                + b"\r\n"
+            )
     parts.append(f"--{boundary}--\r\n".encode())
     body = b"".join(parts)
 
@@ -351,10 +387,11 @@ def upload_one(
         },
     )
     log.info(
-        "upload_one sha_prefix=%s file=%s subs=%s",
+        "upload_one sha_prefix=%s file=%s subs=%s caption_only=%s",
         str(body_payload.get("item", {}).get("sha256", ""))[:12],
         file_path.name,
-        len(sub_file_paths or []),
+        0 if caption_only else len(sub_file_paths or []),
+        caption_only,
     )
     try:
         with urlopen(req, timeout=timeout_sec) as resp:
@@ -362,8 +399,20 @@ def upload_one(
             return json.loads(raw) if raw else {"success": True}
     except HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        log.warning("upload HTTPError status=%s body=%s", e.code, err_body[:300])
-        raise
+        code = None
+        try:
+            parsed = json.loads(err_body)
+            if isinstance(parsed, dict):
+                code = str(parsed.get("code") or "") or None
+        except json.JSONDecodeError:
+            code = None
+        log.warning(
+            "upload HTTPError status=%s code=%s body=%s",
+            e.code,
+            code,
+            err_body[:300],
+        )
+        raise UploadHttpError(int(e.code or 0), code, err_body[:300]) from e
     except URLError as e:
         log.warning("upload URLError %s", e)
         raise
@@ -638,22 +687,67 @@ def cmd_upload(
         if oversized_sub:
             continue
         resp: dict[str, Any] | None = None
+        item = req_payload.get("item") if isinstance(req_payload.get("item"), dict) else {}
+        source_sha = str((item or {}).get("sha256") or "").strip().lower()
+        # [변경사유]: 장부에 있고 묶음이 아니면 파일 생략 (caption-only)
+        caption_only = (
+            not sub_paths
+            and len(source_sha) == 64
+            and is_uploaded_sha(settings.db_path, source_sha)
+        )
         try:
-            resp = upload_one(
-                endpoint=ep,
-                payload=req_payload,
-                file_path=file_path,
-                cookie=cookie,
-                sub_file_paths=sub_paths,
-            )
+            try:
+                resp = upload_one(
+                    endpoint=ep,
+                    payload=req_payload,
+                    file_path=file_path,
+                    cookie=cookie,
+                    sub_file_paths=sub_paths,
+                    caption_only=caption_only,
+                )
+            except UploadHttpError as e:
+                # [변경사유]: 서버가 exact를 못 찾으면 장부 지우고 파일 재전송 1회
+                if (
+                    caption_only
+                    and e.code in CAPTION_ONLY_FALLBACK_CODES
+                    and file_path.is_file()
+                ):
+                    log.info(
+                        "caption-only fallback rel=%s code=%s",
+                        rel,
+                        e.code,
+                    )
+                    forget_uploaded_sha(settings.db_path, source_sha)
+                    resp = upload_one(
+                        endpoint=ep,
+                        payload=req_payload,
+                        file_path=file_path,
+                        cookie=cookie,
+                        sub_file_paths=sub_paths,
+                        caption_only=False,
+                    )
+                    caption_only = False
+                else:
+                    raise
             results.append(
                 {
                     "ok": True,
                     "rel": rel,
-                    "sub_count": len(sub_paths),
+                    "sub_count": 0 if caption_only else len(sub_paths),
+                    "caption_only": caption_only,
                     "response": resp,
                 }
             )
+            fields = response_ledger_fields(resp)
+            rec_sha = fields.get("source_sha256") or source_sha
+            if rec_sha:
+                record_uploaded_sha(
+                    settings.db_path,
+                    source_sha256=rec_sha,
+                    request_idx=fields.get("request_idx"),
+                    next_val=fields.get("next_val"),
+                    final_sha_prefix=fields.get("final_sha_prefix"),
+                )
         except Exception as e:  # noqa: BLE001 — 배치 계속
             results.append({"ok": False, "error": str(e), "rel": rel})
 

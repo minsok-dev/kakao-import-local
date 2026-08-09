@@ -124,8 +124,11 @@ proxy_send_timeout 120s;
 | “예전에 서버에 올렸음” | **서버** exact (`receiveKakaoImport` → `resolveExact`) | 로컬 DB 기억 불필요 |
 | 디스크에 없는 `photo_file` | `prune_missing_photo_files` | 행 유지 금지 (hash/upload 깨짐) |
 
-**비범위 (B):** 로컬 파일 없이 채팅 텍스트만으로 과거 SHA에 캡션 부착 — 어느 SHA인지 자동 구분 불가.  
-**후속(선택):** 대역폭 절감용 `uploaded_sha_ledger` + caption-only(multipart 생략). 캡션 추가 자체와는 별개이며 **미구현**.
+**비범위 (B):** 로컬 파일 없이 채팅 텍스트만으로 과거 SHA에 캡션 부착 — 어느 SHA인지 자동 구분 불가.
+
+**caption-only ledger (구현):** 한 번 성공 업로드한 `source_sha256` 을 로컬 `uploaded_sha_ledger` 에 기록.  
+다음 전송 때 같은 SHA·묶음 아님 → multipart `file` 생략 + `caption_only: true`.  
+서버는 source SHA exact → SNS append (`sns_appended`). exact 없거나 OCR/hold 필요 시 `CAPTION_ONLY_NO_EXACT` / `CAPTION_ONLY_REQUIRES_FILE` → 클라이언트가 장부 삭제 후 파일 재전송.
 
 운영 확인: 재전송 후 응답/로그에 exact SNS append · 서버에 해당 final SHA asset/포스터가 **남아 있어야** 함.
 

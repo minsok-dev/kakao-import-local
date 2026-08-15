@@ -1,5 +1,6 @@
 # [변경사유]: Phase3 — Import payload 생성 (인접/merged 메시지만, 절대경로 금지)
 # [변경사유]: Phase 4.2+ — similar 이후 채팅 매칭 묶음을 main+sub_images 1 request로 붕괴
+# [변경사유]: 실제 붕괴는 KakaoTalk `_01` 동일 시각 스템만 — 연속 단독 사진 제외
 """서버 Import용 payload 빌더."""
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from kakao_import.config import PROJECT_ROOT, Settings
 from kakao_import.caption_sep import join_texts_by_room
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
+from kakao_import.photo_name import kakao_album_stem_and_seq
 from kakao_import.similar_policy import upload_policy_for_decision
 
 log = get_logger(__name__)
@@ -151,7 +153,7 @@ def _load_grouped_photo_shape(
     conn,
     photo_ids: list[int],
 ) -> dict[int, dict[str, Any]]:
-    """채팅 매칭 그룹 메타 — slot_count≥2 이면 묶음(main+sub) 후보."""
+    """채팅 매칭 그룹 메타. slot_count≥2 는 후보 표시일 뿐, 실제 묶음은 `_01` 앨범만."""
     if not photo_ids:
         return {}
     placeholders = ",".join("?" for _ in photo_ids)
@@ -265,6 +267,113 @@ def _apply_similar_policy(
     }
 
 
+def _item_file_name(item: dict[str, Any]) -> str:
+    """업로드 item 의 원본 파일명."""
+    meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+    named = str(meta.get("file_name") or "").strip()
+    if named:
+        return Path(named).name
+    return Path(str(item.get("rel_path") or "")).name
+
+
+def _item_album_stem_seq(item: dict[str, Any]) -> tuple[str | None, int]:
+    """KakaoTalk 앨범 스템·sequence. 파싱 실패면 묶음 불가."""
+    return kakao_album_stem_and_seq(_item_file_name(item))
+
+
+def _is_filename_album_set(members: list[dict[str, Any]]) -> bool:
+    """
+    같은 시각 스템 ≥2장이고 `_01` 이상(sequence≥1)이 1장이라도 있으면 PC 앨범.
+    [변경사유]: 접미사 없는 단독 사진끼리(다른 밀리초)는 묶지 않음.
+    """
+    if len(members) < 2:
+        return False
+    stems: set[str] = set()
+    max_seq = 0
+    for it in members:
+        stem, seq = _item_album_stem_seq(it)
+        if not stem:
+            return False
+        stems.add(stem)
+        if seq > max_seq:
+            max_seq = seq
+    return len(stems) == 1 and max_seq >= 1
+
+
+def _album_order_key(item: dict[str, Any]) -> tuple[int, int, int]:
+    """앨범 내 순서: `_NN` sequence → 채팅 slot → photo_id. 본파일(seq=0)이 main."""
+    meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+    gc = meta.get("group_candidate") if isinstance(meta.get("group_candidate"), dict) else {}
+    _stem, seq = _item_album_stem_seq(item)
+    return (seq, int(gc.get("slot_index") or 0), int(meta.get("photo_id") or 0))
+
+
+def _attach_bundle_to_main(
+    ordered: list[dict[str, Any]],
+    *,
+    client_id: str,
+    gid: int,
+    album_stem: str,
+) -> dict[str, Any]:
+    """ordered[0]=main, 나머지 sub_images. bundled_groups 한 행도 반환."""
+    main = ordered[0]
+    subs = ordered[1:]
+    main_meta = main.get("_meta") if isinstance(main.get("_meta"), dict) else {}
+    gc0 = (
+        main_meta.get("group_candidate")
+        if isinstance(main_meta.get("group_candidate"), dict)
+        else {}
+    )
+    member_shas = [str(main.get("sha256") or "").lower()] + [
+        str(s.get("sha256") or "").lower() for s in subs
+    ]
+    member_photo_ids = [int(main_meta.get("photo_id") or 0)] + [
+        int((s.get("_meta") or {}).get("photo_id") or 0) for s in subs
+    ]
+    main["sub_images"] = [
+        {
+            "sha256": str(s.get("sha256") or "").lower(),
+            "rel_path": str(s.get("rel_path") or "").replace("\\", "/"),
+        }
+        for s in subs
+    ]
+    main_meta["idempotency_key"] = _bundle_idempotency_key(client_id, member_shas)
+    main_meta["bundle"] = {
+        "group_id": gid,
+        "group_key": str(gc0.get("group_key") or ""),
+        "album_stem": album_stem,
+        "slot_count_chat": int(gc0.get("slot_count") or 0),
+        "member_photo_ids": member_photo_ids,
+        "main_photo_id": int(main_meta.get("photo_id") or 0),
+        "member_count": len(ordered),
+    }
+    main_meta["sub_file_names"] = [
+        str(
+            (s.get("_meta") or {}).get("file_name")
+            or Path(str(s.get("rel_path") or "")).name
+        )
+        for s in subs
+    ]
+    row = {
+        "group_id": gid,
+        "group_key": str(gc0.get("group_key") or ""),
+        "album_stem": album_stem,
+        "slot_count_chat": int(gc0.get("slot_count") or 0),
+        "member_photo_ids": member_photo_ids,
+        "main_photo_id": int(main_meta.get("photo_id") or 0),
+        "member_count": len(ordered),
+        "sub_count": len(subs),
+    }
+    log.info(
+        "bundle collapse group_id=%s stem=%s members=%s main_photo=%s",
+        gid,
+        album_stem,
+        len(ordered),
+        main_meta.get("photo_id"),
+    )
+    return row
+
+
 def collapse_grouped_photo_bundles(
     items: list[dict[str, Any]],
     *,
@@ -272,8 +381,10 @@ def collapse_grouped_photo_bundles(
     max_members: int = MAX_BUNDLE_MEMBERS,
 ) -> dict[str, Any]:
     """
-    similar policy 이후 — 같은 채팅 group_id 로 ≥2장이면 1 request(main+sub)로 붕괴.
-    [변경사유]: Phase 4.2+ C+Y — similar는 이미 필터됨. slot_index 최소=main.
+    similar policy 이후 — 같은 채팅 group_id 안에서도
+    KakaoTalk `_01`/`_02` 동일 시각 스템만 1 request(main+sub)로 붕괴.
+    [변경사유]: Phase 4.2+ C+Y — similar는 이미 필터됨.
+    [변경사유]: 연속 단독 사진(접미사 없음·다른 밀리초)은 단건 유지 — 오묶음 방지.
     """
     singles: list[dict[str, Any]] = []
     by_group: dict[int, list[dict[str, Any]]] = {}
@@ -295,83 +406,47 @@ def collapse_grouped_photo_bundles(
     collapsed = 0
 
     for gid, members in sorted(by_group.items(), key=lambda x: x[0]):
-        if len(members) < 2:
-            out.extend(members)
-            continue
+        by_stem: dict[str | None, list[dict[str, Any]]] = {}
+        for it in members:
+            stem, _seq = _item_album_stem_seq(it)
+            by_stem.setdefault(stem, []).append(it)
 
-        def _slot(it: dict[str, Any]) -> int:
-            m = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
-            gc = m.get("group_candidate") if isinstance(m.get("group_candidate"), dict) else {}
-            return int(gc.get("slot_index") or 0)
+        leftovers: list[dict[str, Any]] = []
+        for stem, stem_members in sorted(
+            by_stem.items(), key=lambda x: x[0] or ""
+        ):
+            if stem is None or not _is_filename_album_set(stem_members):
+                leftovers.extend(stem_members)
+                continue
 
-        ordered = sorted(members, key=_slot)
-        if len(ordered) > max_members:
-            log.warning(
-                "bundle truncate group_id=%s kept=%s dropped=%s max=%s",
-                gid,
-                max_members,
-                len(ordered) - max_members,
-                max_members,
+            ordered = sorted(stem_members, key=_album_order_key)
+            if len(ordered) > max_members:
+                log.warning(
+                    "bundle truncate group_id=%s stem=%s kept=%s dropped=%s max=%s",
+                    gid,
+                    stem,
+                    max_members,
+                    len(ordered) - max_members,
+                    max_members,
+                )
+                leftovers.extend(ordered[max_members:])
+                ordered = ordered[:max_members]
+            row = _attach_bundle_to_main(
+                ordered, client_id=client_id, gid=gid, album_stem=stem
             )
-            ordered = ordered[:max_members]
+            out.append(ordered[0])
+            collapsed += len(ordered) - 1
+            bundled_groups.append(row)
 
-        main = ordered[0]
-        subs = ordered[1:]
-        main_meta = main.get("_meta") if isinstance(main.get("_meta"), dict) else {}
-        gc0 = (
-            main_meta.get("group_candidate")
-            if isinstance(main_meta.get("group_candidate"), dict)
-            else {}
-        )
-        member_shas = [str(main.get("sha256") or "").lower()] + [
-            str(s.get("sha256") or "").lower() for s in subs
-        ]
-        member_photo_ids = [int(main_meta.get("photo_id") or 0)] + [
-            int((s.get("_meta") or {}).get("photo_id") or 0) for s in subs
-        ]
-        sub_images = [
-            {
-                "sha256": str(s.get("sha256") or "").lower(),
-                "rel_path": str(s.get("rel_path") or "").replace("\\", "/"),
-            }
-            for s in subs
-        ]
-        main["sub_images"] = sub_images
-        main_meta["idempotency_key"] = _bundle_idempotency_key(client_id, member_shas)
-        main_meta["bundle"] = {
-            "group_id": gid,
-            "group_key": str(gc0.get("group_key") or ""),
-            "slot_count_chat": int(gc0.get("slot_count") or 0),
-            "member_photo_ids": member_photo_ids,
-            "main_photo_id": int(main_meta.get("photo_id") or 0),
-            "member_count": len(ordered),
-        }
-        main_meta["sub_file_names"] = [
-            str(
-                (s.get("_meta") or {}).get("file_name")
-                or Path(str(s.get("rel_path") or "")).name
-            )
-            for s in subs
-        ]
-        out.append(main)
-        collapsed += len(subs)
-        bundled_groups.append(
-            {
-                "group_id": gid,
-                "group_key": str(gc0.get("group_key") or ""),
-                "slot_count_chat": int(gc0.get("slot_count") or 0),
-                "member_photo_ids": member_photo_ids,
-                "main_photo_id": int(main_meta.get("photo_id") or 0),
-                "member_count": len(ordered),
-                "sub_count": len(subs),
-            }
-        )
-        log.info(
-            "bundle collapse group_id=%s members=%s main_photo=%s",
-            gid,
-            len(ordered),
-            main_meta.get("photo_id"),
-        )
+        if leftovers:
+            # [변경사유]: 같은 채팅 그룹이어도 `_01` 스템이 아니면 단건 유지
+            if len(members) >= 2:
+                log.info(
+                    "bundle skip non-album group_id=%s leftover=%s",
+                    gid,
+                    len(leftovers),
+                )
+            out.extend(leftovers)
 
     return {
         "items": out,

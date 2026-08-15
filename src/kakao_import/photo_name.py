@@ -45,3 +45,16 @@ def parse_kakaotalk_filename(file_name: str) -> PhotoNameParse:
     except ValueError as exc:
         return PhotoNameParse(ok=False, name_time=None, ext=ext, sequence=sequence, error=str(exc))
     return PhotoNameParse(ok=True, name_time=dt, ext=ext, sequence=sequence, error=None)
+
+
+def kakao_album_stem_and_seq(file_name: str) -> tuple[str | None, int]:
+    """
+    PC 앨범 묶음 키: 동일 `KakaoTalk_YYYYMMDD_HHMMSSmmm` 스템 + `_NN` sequence.
+    [변경사유]: 채팅 연속 사진만으로 묶지 않고, `_01` 등 파일명 앨범만 식별.
+    """
+    parsed = parse_kakaotalk_filename(Path(file_name).name)
+    if not parsed.ok or parsed.name_time is None:
+        return None, 0
+    ms = parsed.name_time.microsecond // 1000
+    stem = parsed.name_time.strftime("%Y%m%d_%H%M%S") + f"{ms:03d}"
+    return stem, int(parsed.sequence or 0)

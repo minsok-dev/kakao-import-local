@@ -11,7 +11,7 @@ from kakao_import.db import connect, init_schema, status_counts
 from kakao_import.encoding_util import read_text_with_encoding
 from kakao_import.matcher import PhotoSlot, match_photos_to_messages
 from kakao_import.parser import parse_chat_text
-from kakao_import.photo_name import parse_kakaotalk_filename
+from kakao_import.photo_name import kakao_album_stem_and_seq, parse_kakaotalk_filename
 from kakao_import.pipeline import cmd_hash, cmd_run, cmd_scan
 from kakao_import.timeutil import combine_abs, korean_ampm_to_time
 
@@ -55,6 +55,14 @@ def test_photo_name_ms() -> None:
     assert album.sequence == 1
     album2 = parse_kakaotalk_filename("KakaoTalk_20260804_161921080_02.JPG")
     assert album2.ok and album2.sequence == 2 and album2.ext == "jpg"
+    # [변경사유]: 묶음 키는 시각 스템 — `_01` 과 본파일이 같은 키
+    assert kakao_album_stem_and_seq("KakaoTalk_20260804_161921080.png") == (
+        "20260804_161921080",
+        0,
+    )
+    assert kakao_album_stem_and_seq("KakaoTalk_20260804_161921080_01.png")[0] == (
+        "20260804_161921080"
+    )
     bad = parse_kakaotalk_filename("random.jpg")
     assert not bad.ok and bad.error == "unparsed_photo"
 

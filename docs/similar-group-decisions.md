@@ -123,16 +123,18 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 ## 묶음 사진 → main+sub (Phase 4.2+)
 
 <!-- [변경사유]: 2026-08-05 — C+Y 확정 구현. similar와 축 분리 -->
+<!-- [변경사유]: 2026-08-15 — `_01` 동일 시각 스템만 묶음. 연속 단독 사진은 단건 -->
 
-채팅 매칭 `image_group`(`photo`/`photo_multi`, `slot_count≥2`)만 묶음 등록한다.  
-similar `same_content`는 **업로드 대표 1장**이며 main+sub 등록과 무관하다.
+채팅 매칭 `image_group` 안에서 **PC 앨범 파일명**(`KakaoTalk_시각.png` + `KakaoTalk_시각_01.png` …)만 묶음 등록한다.  
+연속 「사진」 메시지·같은 분만으로는 묶지 않는다. similar `same_content`는 **업로드 대표 1장**이며 main+sub 등록과 무관하다.
 
 | 규칙 | 내용 |
 |------|------|
-| 시점 | similar policy **이후** 큐에서 `group_id` 붕괴 |
-| 대표 | 남은 멤버 중 `slot_index` 최소 |
-| 불일치 Y | 슬롯 N · 파일 M≥2 → 있는 장만 묶음; M=1 → 단건 |
-| 상한 | 멤버 5 (main+4 sub) |
+| 시점 | similar policy **이후** 큐에서 같은 `group_id` + 같은 시각 스템 붕괴 |
+| 조건 | 스템 멤버 ≥2 **그리고** 한 장이라도 `_01` 이상(sequence≥1) |
+| 대표 | 같은 스템 안 `sequence` 최소(본파일=0), 동점이면 slot_index |
+| 불일치 Y | 같은 스템 M≥2 → 있는 장만 묶음; `_01` 없는 단독은 단건 |
+| 상한 | 멤버 5 (main+4 sub). 초과 스템 멤버는 드롭하지 않고 **단건으로 잔류** |
 | payload | `item.sub_images[{sha256,rel_path}]` · multipart `file`+`sub_i` |
 | exact | main만 기존 C/D/E/F; 신규 OCR(`ocr_queued`)일 때만 sub 첨부 |
 

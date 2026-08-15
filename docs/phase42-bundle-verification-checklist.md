@@ -21,11 +21,12 @@
 
 - [x] `kakao-import upload --dry-run` (또는 export-payload) 실행
 - [x] `last_upload_manifest.json` / `upload-result.json`에 `bundled_groups`, `bundle_collapsed_count` 존재
-- [x] 채팅 `사진`×N(N≥2) + 로컬 파일 ≥2(본파일+`_01`…) → request 1건, `item.sub_images` 길이 = N−1(또는 있는 장−1)
-- [x] main = `slot_index` 최소 사진의 `rel_path` / `sha256`
-- [x] 슬롯 3 · 파일 2(Y) → 멤버 2로 묶임, 단건으로 쪼개지지 않음 *(해당 케이스 관측·계약 유지)*
+- [x] 채팅 `사진`×N(N≥2) + 로컬 **본파일+`_01`… 동일 시각 스템** ≥2 → request 1건, `item.sub_images` 길이 = 스템 장수−1
+- [x] 접미사 없는 단독 2장(다른 밀리초, 같은 분) → **단건 2개** (오묶음 금지)
+- [x] main = 같은 스템에서 `sequence` 최소(본파일)의 `rel_path` / `sha256`
+- [x] 슬롯 3 · 같은 스템 파일 2(Y) → 멤버 2로 묶임, 단건으로 쪼개지지 않음 *(해당 케이스 관측·계약 유지)*
 - [x] 슬롯 ≥2 · 파일 1 → **단건** (묶음 아님) *(계약·단위 테스트)*
-- [ ] 멤버 >5 → 5장만 유지, 초과는 로그 truncate *(실데이터 미관측 — 단위/계약만)*
+- [x] 멤버 >5 → 5장만 묶음, 초과는 **단건 잔류** + 로그 truncate *(단위 테스트)*
 - [x] similar `same_content` 비대표는 스킵되고, **남은** 채팅 그룹만 묶임(similar≠main+sub)
 - [x] `deferred` 그룹 있으면 기존처럼 upload 차단 *(리뷰에서 deferred↔same_content 전환 확인)*
 

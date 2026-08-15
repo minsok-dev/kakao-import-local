@@ -118,9 +118,10 @@ decision: `same_content` / `different_content` / `partial` / `deferred` (upload 
 - `partial`: subgroup 대표 + singleton만 후보 유지
 - `deferred`: dry-run / upload 모두 기본 차단
 <!-- [변경사유]: Phase 4.2+ — 채팅 매칭 묶음 → 서버 main+sub 1 OCR -->
-- **묶음 사진(4.2+)**: similar 적용 **후** 채팅 `image_group`(`slot_count≥2`)에서 남은 파일이 ≥2장이면 **1 request = main + sub_images**
+- **묶음 사진(4.2+)**: similar 적용 **후** 채팅 `image_group` 안에서 **동일 `KakaoTalk_…_HHMMSSmmm` 스템 + `_01`/`_02`…** 인 장만 **1 request = main + sub_images**
+  - 접미사 없는 단독 파일(다른 밀리초)은 채팅이 연속이어도 **단건**
   - similar `same_content` ≠ main+sub (similar는 대표 1장 유지)
-  - 슬롯 N · 로컬 M(M≥2, M&lt;N) → **있는 장만** 묶음 (Y)
+  - 같은 스템 M≥2(M&lt;슬롯 N) → **있는 장만** 묶음 (Y)
   - 멤버 상한 **5** (main+4 sub); exact 경로(SNS/hold)에서는 main만 처리·sub 미첨부
   - payload: `item.sub_images: [{ sha256, rel_path }]` · multipart `file` + `sub_0`…
 

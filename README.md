@@ -29,7 +29,8 @@
 
 Phase 1 완료 = ESENCIA golden(`…005030533` / `…005034512` ↔ `오전 12:50` 사진 2줄) 자동 통과 포함.
 
-상세: [docs/development-plan.md](docs/development-plan.md) **v1.3** · Phase3: [docs/phase3-import.md](docs/phase3-import.md) · 안정화: [docs/phase3-ops-stabilization.md](docs/phase3-ops-stabilization.md)
+상세: [docs/development-plan.md](docs/development-plan.md) **v1.3** · Phase3: [docs/phase3-import.md](docs/phase3-import.md) · 안정화: [docs/phase3-ops-stabilization.md](docs/phase3-ops-stabilization.md)  
+PC 카톡에서 파일을 꺼내는 도구(별도, 하이브리드 UIA+좌표 3곳): [docs/kakao-pc-collect-plan.md](docs/kakao-pc-collect-plan.md)
 
 ## 요구 사항
 

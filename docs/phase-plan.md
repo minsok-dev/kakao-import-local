@@ -32,4 +32,5 @@ Phase 1 완료 = [golden-esencia-20260724-0050.md](./golden-esencia-20260724-005
 
 - Phase 4 로컬 Similar (서버 Similar hold가 본경로)
 - watcher / 자동 승인 (데이터 신뢰성 확보 전)
+- PC 카톡 UI 수집은 이 레포가 아님 — [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md)
 - Exact/similar/신규 OCR happy path 변경 (3.5는 안정화만)

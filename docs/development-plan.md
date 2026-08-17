@@ -11,7 +11,7 @@
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
 | **현재 초점** | **Phase 4.2 similar upload policy 반영** (`deferred` 차단 + dry-run/result 노출) |
 
-관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md)
+관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md)
 
 ---
 
@@ -233,6 +233,8 @@ chats/*.txt 파싱
 **보류:** Phase **3.5** 안정화·E2E 통과 전 착수하지 않는다.  
 자동화하면 empty adjacent·매칭 실패 데이터가 그대로 유입될 수 있다.
 
+PC 카톡에서 txt·사진을 **꺼내는** 도구는 1.5 watcher가 아니다. 별도 계약: [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md).
+
 ---
 
 ### Phase 2 — 텍스트 merge · 모드
@@ -419,6 +421,9 @@ service token 완전 자동 전송, similar 자동 통합, CLIP,
 기존 콘텐츠 자동 보완, 대표 이미지 자동 교체, legacy 대량 백필, 운영 대시보드,  
 카카오→`tbl_ingest_raw` 통합.
 
+**PC 카톡 준자동 수집**(검색·Ctrl+S·서랍 50칸·좌표 3곳·Documents→photos)은 import와 **분리**한다.  
+계약: [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md). 하이브리드(UIA+최소 좌표). 끝나면 `run`+`similar-detect`만 호출하고 upload는 similar-review 후.
+
 Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2E 후 **병렬 가능**.
 
 ---
@@ -457,3 +462,5 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 | **1.6** | `_01` 파싱 · multi_room 캡션 union+ADD 구분선 · 터미널 한글 요약. 실데이터 검증 **현재까지 오류 없음** |
 | **1.7** | Exact SNS·F hold·015/016 **상용 운영** 문서 동기화 (2026-08-09) |
 | **1.8** | caption-only ledger · similar 서명 30MiB |
+| **1.9** | PC 카톡 수집 도구 계약 — [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md) (import와 분리, 2026-08-17) |
+| **1.10** | PC 수집 하이브리드 실측 — Ctrl+S txt, 서랍 가상스크롤·다운로드 좌표 3곳, 워터마크 배치 중단 |

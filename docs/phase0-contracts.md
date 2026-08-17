@@ -13,7 +13,7 @@ PC 다운로드 파일과 대화 내보내기를 사용한다.
 ## 2. 핵심 파이프라인 계약
 
 ```text
-공용 photos/ + 방별 chats/*.txt
+방별 photos/ + chats/*.txt (`<room_id>/`). 구 공용 풀은 `_legacy`
 → 대화 TXT 파싱
 → KakaoTalk_ 파일명 시각 ↔ 메시지 절대시각 매칭
 → (SHA exact / 이력) → (텍스트 merge) → Import
@@ -26,8 +26,10 @@ PC 다운로드 파일과 대화 내보내기를 사용한다.
 
 ```text
 input/raw/
-  chats/     # 방별 export txt
-  photos/    # 이미지 공용 풀
+  <room_id>/
+    chats/     # 해당 방 export txt
+    photos/    # 해당 방 이미지
+  chats/ + photos/   # 구 레이아웃 → room_id=_legacy
 ```
 
 ## 3. 엔티티 (SQLite) — Phase 0/1 목표

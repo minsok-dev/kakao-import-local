@@ -7,7 +7,7 @@
 
 | 구분 | 로컬 (이 프로젝트) | 서버 |
 |------|-------------------|------|
-| 입력 | `input/raw/chats/` + `input/raw/photos/` (공용 이미지) | — |
+| 입력 | `input/raw/<room_id>/chats/` + `photos/` (방별). 구 `chats/`+`photos/`는 `_legacy` | — |
 | 매칭 | `KakaoTalk_` **파일명 시각** ↔ 메시지 시각 | 최종 exact / similar |
 | Exact | SHA-256 | 서버 전 범위 검사 (Phase 3) |
 | 텍스트 | balanced merge (Phase 2) | OCR + 카카오 메시지 → GPT |

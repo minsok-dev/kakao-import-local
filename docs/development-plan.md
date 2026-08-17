@@ -7,7 +7,7 @@
 | 문서 버전 | **1.4** |
 | 기준일 | 2026-08-04 |
 | 레포 | `kakao-import-local` (로컬) · `frontend` / `backend` (Phase 3~) |
-| 입력 샘플 | `input/raw/chats/` + `input/raw/photos/` (gitignore) |
+| 입력 샘플 | `input/raw/<room_id>/chats/` + `photos/` (gitignore). 구 평탄 레이아웃은 `_legacy` |
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
 | **현재 초점** | **Phase 4.2 similar upload policy 반영** (`deferred` 차단 + dry-run/result 노출) |
 
@@ -32,12 +32,14 @@ Instagram/밴드 **크롤 어댑터와 동일시하지 않는다.**
 
 ```text
 input/raw/
-  chats/          # 방별 대화 export (*.txt)만
-  photos/         # 모든 방 이미지 공용 풀
+  <room_id>/
+    chats/          # 해당 방 대화 txt
+    photos/         # 해당 방 이미지
+  chats/ + photos/  # 구 레이아웃(_legacy) — golden·기존 파일 호환
 ```
 
-- 방별로 사진을 나누지 **않는다** (중복 보관 비효율).
-- 스캐너는 `photos_root` + `chat_files[]` 분리. “방 폴더 안 사진” 가정 **폐기**.
+- 방별로 txt·사진을 나눈다. 매칭은 **같은 room_id 안에서만**.
+- 구 `chats/`+`photos/` 공용 풀은 `_legacy` 로 스캔한다.
 
 ### 2.2 대화 형식 (PC 내보내기)
 

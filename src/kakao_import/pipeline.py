@@ -28,7 +28,7 @@ from kakao_import.db import (
 )
 from kakao_import.hashutil import sha256_file
 from kakao_import.logging_util import get_logger
-from kakao_import.matcher import PhotoSlot, match_photos_to_messages
+from kakao_import.matcher import MatchOutput, PhotoSlot, match_photos_to_messages
 from kakao_import.merge_ops import decide_text_merge, undo_text_merge
 from kakao_import.parser import parse_chat_file
 from kakao_import.photo_name import parse_kakaotalk_filename
@@ -37,10 +37,53 @@ from kakao_import.text_merge import TextBundle, merge_exact_texts
 log = get_logger(__name__)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+LEGACY_ROOM_ID = "_legacy"
+
+
+def room_id_from_rel(rel: str) -> str:
+    """
+    상대경로에서 방 id.
+    gangnam_latin/photos/a.jpg → gangnam_latin
+    chats/a.txt (구 레이아웃) → _legacy
+    [변경사유]: 방별 폴더 매칭 — 다른 방 캡션과 섞이지 않게.
+    """
+    parts = (rel or "").replace("\\", "/").strip("/").split("/")
+    if len(parts) >= 2 and parts[1] in ("chats", "photos"):
+        return parts[0]
+    if parts and parts[0] in ("chats", "photos"):
+        return LEGACY_ROOM_ID
+    return LEGACY_ROOM_ID
+
+
+def iter_room_layouts(root: Path) -> list[tuple[str, Path, Path]]:
+    """
+    (room_id, chats_dir, photos_dir).
+    신: root/<room_id>/chats + photos
+    구: root/chats + root/photos (_legacy) — golden·기존 데이터.
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"export root missing: {root}")
+    out: list[tuple[str, Path, Path]] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name in ("chats", "photos"):
+            continue
+        chats = child / "chats"
+        photos = child / "photos"
+        if chats.is_dir() or photos.is_dir():
+            out.append((child.name, chats, photos))
+    legacy_chats = root / "chats"
+    legacy_photos = root / "photos"
+    if legacy_chats.is_dir() or legacy_photos.is_dir():
+        out.append((LEGACY_ROOM_ID, legacy_chats, legacy_photos))
+    if not out:
+        raise FileNotFoundError(
+            f"방 폴더(<id>/chats|photos) 또는 구 chats/+photos/ 없음 under {root}"
+        )
+    return out
 
 
 def resolve_layout(root: Path) -> tuple[Path, Path]:
-    """chats/ + photos/ 경로."""
+    """구 레이아웃 chats/ + photos/. 테스트·golden 호환."""
     chats = root / "chats"
     photos = root / "photos"
     if not chats.is_dir():
@@ -64,42 +107,50 @@ def cmd_scan(settings: Settings, root: Path | None = None) -> dict[str, Any]:
     """사진 파일 인덱스만 (SHA 전)."""
     root = root or settings.export_root
     assert root is not None
-    _, photos_dir = resolve_layout(root)
+    layouts = iter_room_layouts(root)
     with connect(settings.db_path) as conn:
         batch_id = start_batch(conn, root.name)
         n = 0
         unparsed = 0
-        for path in sorted(photos_dir.iterdir()):
-            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        for room_id, _chats_dir, photos_dir in layouts:
+            if not photos_dir.is_dir():
                 continue
-            parsed = parse_kakaotalk_filename(path.name)
-            st = path.stat()
-            rel = rel_under(root, path)
-            name_time = parsed.name_time.isoformat(timespec="milliseconds") if parsed.name_time else None
-            pid = upsert_photo(
-                conn,
-                rel_path=rel,
-                file_name=path.name,
-                ext=parsed.ext,
-                byte_size=st.st_size,
-                mtime_ns=getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
-                name_time=name_time,
-                name_parse_ok=1 if parsed.ok else 0,
-                batch_id=batch_id,
-            )
-            n += 1
-            if not parsed.ok:
-                unparsed += 1
-                insert_parse_error(
-                    conn,
-                    batch_id=batch_id,
-                    source_rel=rel,
-                    line_no=None,
-                    raw_excerpt=path.name,
-                    error_code="unparsed_photo",
-                    detail=parsed.error,
+            log.info("scan room=%s photos_dir=%s", room_id, photos_dir)
+            for path in sorted(photos_dir.iterdir()):
+                if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+                    continue
+                parsed = parse_kakaotalk_filename(path.name)
+                st = path.stat()
+                rel = rel_under(root, path)
+                name_time = (
+                    parsed.name_time.isoformat(timespec="milliseconds")
+                    if parsed.name_time
+                    else None
                 )
-            log.info("scan photo id=%s parse_ok=%s", pid, parsed.ok)
+                pid = upsert_photo(
+                    conn,
+                    rel_path=rel,
+                    file_name=path.name,
+                    ext=parsed.ext,
+                    byte_size=st.st_size,
+                    mtime_ns=getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
+                    name_time=name_time,
+                    name_parse_ok=1 if parsed.ok else 0,
+                    batch_id=batch_id,
+                )
+                n += 1
+                if not parsed.ok:
+                    unparsed += 1
+                    insert_parse_error(
+                        conn,
+                        batch_id=batch_id,
+                        source_rel=rel,
+                        line_no=None,
+                        raw_excerpt=path.name,
+                        error_code="unparsed_photo",
+                        detail=parsed.error,
+                    )
+                log.info("scan photo id=%s room=%s parse_ok=%s", pid, room_id, parsed.ok)
         summary = {"photos": n, "unparsed_photo": unparsed, "batch_id": batch_id}
         finish_batch(conn, batch_id, summary)
         conn.commit()
@@ -110,56 +161,66 @@ def cmd_parse(settings: Settings, root: Path | None = None) -> dict[str, Any]:
     """채팅 TXT 파싱."""
     root = root or settings.export_root
     assert root is not None
-    chats_dir, _ = resolve_layout(root)
+    layouts = iter_room_layouts(root)
     with connect(settings.db_path) as conn:
         batch_id = start_batch(conn, root.name)
         rooms = 0
         msgs = 0
         photo_msgs = 0
-        for path in sorted(chats_dir.glob("*.txt")):
-            result = parse_chat_file(path)
-            st = path.stat()
-            rel = rel_under(root, path)
-            chat_id = upsert_chat_source(
-                conn,
-                rel_path=rel,
-                room_title=result.room_title,
-                file_size=st.st_size,
-                mtime_ns=getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
-                content_sha256=result.content_sha256,
-                encoding=result.encoding,
-                batch_id=batch_id,
-            )
-            rows = []
-            for m in result.messages:
-                rows.append(
-                    {
-                        "seq": m.seq,
-                        "msg_kind": m.msg_kind,
-                        "sender": m.sender,
-                        "abs_time": m.abs_time.isoformat(timespec="seconds") if m.abs_time else None,
-                        "body_raw": m.body_raw,
-                        "body_norm": m.body_norm,
-                        "photo_count": m.photo_count,
-                        "line_no": m.line_no,
-                    }
-                )
-                if m.msg_kind in ("photo", "photo_multi"):
-                    photo_msgs += 1
-            replace_messages(conn, chat_id, rows)
-            for err in result.errors:
-                insert_parse_error(
+        for room_id, chats_dir, _photos_dir in layouts:
+            if not chats_dir.is_dir():
+                continue
+            log.info("parse room=%s chats_dir=%s", room_id, chats_dir)
+            for path in sorted(chats_dir.glob("*.txt")):
+                result = parse_chat_file(path)
+                st = path.stat()
+                rel = rel_under(root, path)
+                chat_id = upsert_chat_source(
                     conn,
+                    rel_path=rel,
+                    room_title=result.room_title,
+                    file_size=st.st_size,
+                    mtime_ns=getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
+                    content_sha256=result.content_sha256,
+                    encoding=result.encoding,
                     batch_id=batch_id,
-                    source_rel=rel,
-                    line_no=err.line_no,
-                    raw_excerpt=err.raw_excerpt,
-                    error_code=err.error_code,
-                    detail=err.detail,
                 )
-            rooms += 1
-            msgs += len(rows)
-            log.info("parse chat rel=%s messages=%s encoding=%s", rel, len(rows), result.encoding)
+                rows = []
+                for m in result.messages:
+                    rows.append(
+                        {
+                            "seq": m.seq,
+                            "msg_kind": m.msg_kind,
+                            "sender": m.sender,
+                            "abs_time": m.abs_time.isoformat(timespec="seconds") if m.abs_time else None,
+                            "body_raw": m.body_raw,
+                            "body_norm": m.body_norm,
+                            "photo_count": m.photo_count,
+                            "line_no": m.line_no,
+                        }
+                    )
+                    if m.msg_kind in ("photo", "photo_multi"):
+                        photo_msgs += 1
+                replace_messages(conn, chat_id, rows)
+                for err in result.errors:
+                    insert_parse_error(
+                        conn,
+                        batch_id=batch_id,
+                        source_rel=rel,
+                        line_no=err.line_no,
+                        raw_excerpt=err.raw_excerpt,
+                        error_code=err.error_code,
+                        detail=err.detail,
+                    )
+                rooms += 1
+                msgs += len(rows)
+                log.info(
+                    "parse chat rel=%s room=%s messages=%s encoding=%s",
+                    rel,
+                    room_id,
+                    len(rows),
+                    result.encoding,
+                )
         summary = {
             "batch_id": batch_id,
             "rooms": rooms,
@@ -191,7 +252,6 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         for r in photos_rows:
             if not r["name_parse_ok"] or not r["name_time"]:
                 continue
-            # [변경사유]: DB에 seq 컬럼 없이 file_name 재파싱 — `_01` 정렬용
             seq = parse_kakaotalk_filename(str(r["file_name"] or "")).sequence
             photo_slots.append(
                 PhotoSlot(
@@ -204,23 +264,47 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
 
         msg_rows = conn.execute(
             """
-            SELECT id, chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, photo_count
-            FROM parsed_message
-            ORDER BY chat_id, seq
+            SELECT m.id, m.chat_id, m.seq, m.msg_kind, m.sender, m.abs_time,
+                   m.body_raw, m.body_norm, m.photo_count, c.rel_path AS chat_rel
+            FROM parsed_message m
+            JOIN chat_source c ON c.id = m.chat_id
+            ORDER BY m.chat_id, m.seq
             """
         ).fetchall()
         messages = [dict(r) for r in msg_rows]
 
-        result = match_photos_to_messages(
-            photos=photo_slots,
-            messages=messages,
-            tolerance_seconds=settings.match_tolerance_seconds,
-            group_text_max_gap_minutes=settings.group_text_max_gap_minutes,
-            different_sender_grace_seconds=settings.different_sender_grace_seconds,
-            different_sender_max_chars=settings.different_sender_max_chars,
-            # [변경사유]: 사진 앞 텍스트 ≤2분 귀속
-            group_text_before_max_seconds=settings.group_text_before_max_seconds,
-        )
+        # [변경사유]: 방별로만 매칭 — 같은 분 다른 방 캡션 혼입 방지
+        photos_by_room: dict[str, list[PhotoSlot]] = {}
+        for p in photo_slots:
+            rid = room_id_from_rel(p.rel_path)
+            photos_by_room.setdefault(rid, []).append(p)
+        msgs_by_room: dict[str, list[dict[str, Any]]] = {}
+        for m in messages:
+            rid = room_id_from_rel(str(m.get("chat_rel") or ""))
+            msgs_by_room.setdefault(rid, []).append(m)
+
+        result = MatchOutput()
+        for rid in sorted(set(photos_by_room) | set(msgs_by_room)):
+            part = match_photos_to_messages(
+                photos=photos_by_room.get(rid, []),
+                messages=msgs_by_room.get(rid, []),
+                tolerance_seconds=settings.match_tolerance_seconds,
+                group_text_max_gap_minutes=settings.group_text_max_gap_minutes,
+                different_sender_grace_seconds=settings.different_sender_grace_seconds,
+                different_sender_max_chars=settings.different_sender_max_chars,
+                group_text_before_max_seconds=settings.group_text_before_max_seconds,
+            )
+            log.info(
+                "match room=%s photos=%s messages=%s groups=%s",
+                rid,
+                len(photos_by_room.get(rid, [])),
+                len(msgs_by_room.get(rid, [])),
+                len(part.groups),
+            )
+            result.assignments.extend(part.assignments)
+            result.groups.extend(part.groups)
+            result.group_texts.extend(part.group_texts)
+            result.reviews.extend(part.reviews)
 
         group_ids: dict[str, int] = {}
         for g in result.groups:

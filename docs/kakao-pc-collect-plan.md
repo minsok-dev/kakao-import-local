@@ -10,7 +10,7 @@
 | 상태 | **계약·실측 확정 · 골격 구현** (`kakao-pc-collect`) |
 | 구현 위치 | **`F:/site_kdance/TEST_web/kakao-pc-collect`** (이 레포에 UI 자동화 넣지 않음) |
 | 대상 방 | 단체방 **약 6개** (허용 목록) |
-| 산출물 | `input/raw/chats/*.txt` + `input/raw/photos/KakaoTalk_*` (원본 파일명·형식 유지) |
+| 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지) |
 | 후속 | 수집 종료 시 `kakao-import run` + `similar-detect` **명시 호출** (폴더 watcher 아님) |
 
 관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md)
@@ -32,7 +32,7 @@
 run → similar-detect → similar-review(사람) → upload --dry-run → upload --no-dry-run
 ```
 
-입력은 그대로 `input/raw/chats` + `input/raw/photos`이다.  
+입력은 방별 `input/raw/<room_id>/chats` + `photos`이다. 구 `chats/`+`photos/`는 `_legacy` 호환.  
 카톡이 만드는 **원본 파일명·형식**을 유지해야 한다 (리네임·재인코딩 금지).
 
 ---
@@ -84,8 +84,8 @@ run → similar-detect → similar-review(사람) → upload --dry-run → uploa
 D:\Users\msgu\Documents\카카오톡 받은 파일
         │  신규 KakaoTalk_*.png/jpg 만 이름 유지 복사
         ▼
-kakao-import-local/input/raw/chats
-kakao-import-local/input/raw/photos
+kakao-import-local/input/raw/<room_id>/chats
+kakao-import-local/input/raw/<room_id>/photos
         │  A가 “이번 회차 끝”일 때 호출
         ▼
 kakao-import run
@@ -182,7 +182,7 @@ kakao-import upload --no-dry-run
 다운로드 후 파일은 항상:
 
 `D:\Users\msgu\Documents\카카오톡 받은 파일`  
-→ 신규 `KakaoTalk_*.png/jpg`만 `input/raw/photos`로 **이름 유지 복사**. `.mp4` 제외.
+→ 신규 `KakaoTalk_*.png/jpg`만 `input/raw/<room_id>/photos`로 **이름 유지 복사**. `.mp4` 제외.
 
 파일명 예:
 

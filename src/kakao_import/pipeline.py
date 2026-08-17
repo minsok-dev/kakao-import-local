@@ -784,10 +784,11 @@ def cmd_similar_detect(
         group_stats = rebuild_similar_groups(conn, max_distance=dist)
         conn.commit()
         log.info(
-            "similar-detect signed=%s groups=%s members=%s dist=%s",
+            "similar-detect signed=%s groups=%s members=%s skip_exact=%s dist=%s",
             sign_stats.get("signed"),
             group_stats.get("groups"),
             group_stats.get("members"),
+            group_stats.get("skipped_exact"),
             dist,
         )
         return {"ok": True, "sign": sign_stats, "groups": group_stats}

@@ -136,11 +136,25 @@ def rebuild_similar_groups(
     workspace_key: str = "current",
 ) -> dict[str, Any]:
     """signature 기반 그룹 재구성. decision 기본 deferred. upload 큐는 건드리지 않음."""
+    # [변경사유]: SHA 완전 동일(업로드 제외) 장은 similar-review에 넣지 않음 — AllDup 대체
+    skip_row = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM photo_signature s
+        JOIN exact_sha_member em ON em.photo_id = s.photo_id
+        WHERE IFNULL(em.excluded_from_upload, 0) = 1
+        """
+    ).fetchone()
+    skipped_exact = int(skip_row["n"] if skip_row else 0)
     rows = conn.execute(
         """
         SELECT s.photo_id, s.dhash_hex, s.phash_hex, p.sha256
         FROM photo_signature s
         JOIN photo_file p ON p.id = s.photo_id
+        WHERE s.photo_id NOT IN (
+            SELECT photo_id FROM exact_sha_member
+            WHERE IFNULL(excluded_from_upload, 0) = 1
+        )
         """
     ).fetchall()
     photos = [
@@ -153,6 +167,14 @@ def rebuild_similar_groups(
         for r in rows
     ]
     clusters = cluster_similar_photos(photos, max_distance=max_distance)
+    log.info(
+        "similar groups skip_exact=%s cluster_photos=%s groups=%s members=%s dist=%s",
+        skipped_exact,
+        len(photos),
+        len(clusters),
+        sum(len(c.photo_ids) for c in clusters),
+        max_distance,
+    )
 
     conn.execute(
         "DELETE FROM similar_image_member WHERE group_id IN "
@@ -193,6 +215,7 @@ def rebuild_similar_groups(
 
     return {
         "signatures": len(photos),
+        "skipped_exact": skipped_exact,
         "groups": len(clusters),
         "members": sum(len(c.photo_ids) for c in clusters),
         "max_distance": max_distance,

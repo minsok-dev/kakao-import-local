@@ -151,6 +151,76 @@ def _insert_bundle_match_context(conn, *, batch_id: int, photo_ids: list[int]) -
         )
 
 
+def test_rebuild_omits_excluded_exact_duplicates(tmp_path: Path) -> None:
+    """업로드 제외 SHA 복사본은 similar 그룹에 넣지 않는다."""
+    db = tmp_path / "exact-hide.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="same")
+        p2 = _insert_photo(conn, rel="photos/a_copy.jpg", sha="same")
+        p3 = _insert_photo(conn, rel="photos/b.jpg", sha="other")
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "same")
+        _insert_sig(conn, p2, "0000000000000000", "0000000000000000", "same")
+        _insert_sig(conn, p3, "0000000000000001", "0000000000000000", "other")
+        eg = conn.execute(
+            "INSERT INTO exact_sha_group (sha256, representative_photo_id, member_count) "
+            "VALUES ('same', ?, 2)",
+            (p1,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO exact_sha_member (group_id, photo_id, is_representative, excluded_from_upload) "
+            "VALUES (?, ?, 1, 0)",
+            (eg, p1),
+        )
+        conn.execute(
+            "INSERT INTO exact_sha_member (group_id, photo_id, is_representative, excluded_from_upload) "
+            "VALUES (?, ?, 0, 1)",
+            (eg, p2),
+        )
+        _insert_exact_group(conn, p3, "other")
+        stats = rebuild_similar_groups(conn, max_distance=10)
+        assert stats["skipped_exact"] == 1
+        assert stats["groups"] == 1
+        groups = list_similar_groups(conn)
+        member_ids = {m["photo_id"] for m in groups[0]["members"]}
+        assert member_ids == {p1, p3}
+        assert p2 not in member_ids
+        conn.commit()
+
+
+def test_rebuild_hides_exact_only_pair(tmp_path: Path) -> None:
+    """SHA가 같은 두 장만 있으면 similar 그룹을 만들지 않는다."""
+    db = tmp_path / "exact-only.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="same")
+        p2 = _insert_photo(conn, rel="photos/a_copy.jpg", sha="same")
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "same")
+        _insert_sig(conn, p2, "0000000000000000", "0000000000000000", "same")
+        eg = conn.execute(
+            "INSERT INTO exact_sha_group (sha256, representative_photo_id, member_count) "
+            "VALUES ('same', ?, 2)",
+            (p1,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO exact_sha_member (group_id, photo_id, is_representative, excluded_from_upload) "
+            "VALUES (?, ?, 1, 0)",
+            (eg, p1),
+        )
+        conn.execute(
+            "INSERT INTO exact_sha_member (group_id, photo_id, is_representative, excluded_from_upload) "
+            "VALUES (?, ?, 0, 1)",
+            (eg, p2),
+        )
+        stats = rebuild_similar_groups(conn, max_distance=10)
+        assert stats["skipped_exact"] == 1
+        assert stats["groups"] == 0
+        assert list_similar_groups(conn) == []
+        conn.commit()
+
+
 def test_rebuild_and_decide_does_not_touch_exact_exclude(tmp_path: Path) -> None:
     """decision 저장은 exact_sha_member.excluded_from_upload 을 바꾸지 않음."""
     db = tmp_path / "t.db"

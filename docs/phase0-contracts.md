@@ -142,7 +142,10 @@ decision: `same_content` / `different_content` / `partial` / `deferred` (upload 
 | 같은 분에 방 ≥2 + 로컬 후보 ≥1 | **배정 유지**(medium·review). 이유 `multi_room_caption_union` |
 | 캡션 | 그 분에 사진이 있던 **모든 방**의 앞/뒤 텍스트를 **같은 group에 add** (message_id 중복 제거) |
 | 방 구분 | 방이 바뀔 때 `\n\n<------------- ADD 구분선 ------------>\n\n` 삽입 (`caption_sep.py`) |
+| 단톡방 표시 | 각 방 블록 최상단 `[단톡방: {제목}]` |
+| 이미지 앞/뒤 글 | 같은 방에서 앞·뒤 설명을 합치면 `\n\n<------------- 채팅분리 구분선 ------------>\n\n` (ADD 와 구분) |
 | 방마다 설명이 거의 같음 | 업로드·text_merge 단계에서 동일 블록 중복 제거 |
+| Similar 같은 콘텐츠/부분 | 스킵 멤버 설명을 대표 본문에 union (exact SHA 와 동일 취지) |
 | 같은 분·서로 다른 포스터 + 로컬 1장 | 과다 귀속 가능 — review 표시. 누락보다 과다 우선 |
 
 하지 않음: 초로 “어느 방인지” 판별(채팅에 초 없음).  

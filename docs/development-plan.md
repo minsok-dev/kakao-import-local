@@ -11,7 +11,7 @@
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
 | **현재 초점** | **Phase 4.2 similar upload policy 반영** (`deferred` 차단 + dry-run/result 노출) |
 
-관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [poster-classifier-dev.md](./poster-classifier-dev.md)
+관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [poster-classifier-dev.md](./poster-classifier-dev.md) · **[ingest-dedup-reject-plan.md](./ingest-dedup-reject-plan.md)** (SHA 재사용·거부 목록, 2026-08-19 초안·착수 전)
 
 ---
 

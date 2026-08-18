@@ -10,6 +10,7 @@ from kakao_import.payload import (
     MAX_BUNDLE_MEMBERS,
     _bundle_idempotency_key,
     collapse_grouped_photo_bundles,
+    media_fingerprint,
 )
 from kakao_import.photo_name import kakao_album_stem_and_seq
 
@@ -169,12 +170,13 @@ def test_no_collapse_non_kakao_filenames() -> None:
 
 def test_bundle_idempotency_stable() -> None:
     shas = ["a" * 64, "b" * 64, "c" * 64]
-    k1 = _bundle_idempotency_key("cid", shas)
-    k2 = _bundle_idempotency_key("cid", list(reversed(shas)))
+    cap = "c" * 64
+    k1 = _bundle_idempotency_key(shas, cap)
+    k2 = _bundle_idempotency_key(list(reversed(shas)), cap)
     assert k1 == k2
     assert len(k1) == 64
-    joined = "|".join(sorted(shas))
-    assert k1 == hashlib.sha256(f"cid|bundle|{joined}".encode()).hexdigest()
+    media = media_fingerprint(shas[0], shas)
+    assert k1 == hashlib.sha256(f"kakao:upload:v1:{media}:{cap}".encode()).hexdigest()
 
 
 def test_max_members_truncate_overflow_stays_single() -> None:

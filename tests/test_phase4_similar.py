@@ -149,6 +149,14 @@ def _insert_bundle_match_context(conn, *, batch_id: int, photo_ids: list[int]) -
             """,
             (batch_id, group_id, photo_id, msg_id, idx),
         )
+    # [변경사유]: 업로드 캡션은 group_text 기준 — 테스트도 동일하게 연결
+    conn.execute(
+        """
+        INSERT INTO group_text (group_id, message_id, seq_in_group)
+        VALUES (?, ?, 1)
+        """,
+        (group_id, msg_id),
+    )
 
 
 def test_rebuild_omits_excluded_exact_duplicates(tmp_path: Path) -> None:
@@ -357,7 +365,9 @@ def test_build_batch_manifest_same_content_keeps_representative_and_bundle_shape
     assert manifest["item_count"] == 1
     req = manifest["requests"][0]
     assert req["item"]["local_item_id"].startswith(f"photo:{p1}:")
-    assert req["item"]["matched_messages"][0]["text"] == "[CASE-B] 화요 바차타 특강 안내"
+    assert req["item"]["matched_messages"][0]["text"] == (
+        "[단톡방: room]\n[CASE-B] 화요 바차타 특강 안내"
+    )
     assert len(manifest["similar_policy"]["skipped"]) == 1
     assert manifest["similar_policy"]["skipped"][0]["reason"] == "similar_non_representative"
     assert len(manifest["grouped_photo_candidates"]) == 1
@@ -407,3 +417,120 @@ def test_build_batch_manifest_partial_keeps_subgroup_rep_and_singleton(
     assert manifest["similar_policy"]["skipped"][0]["reason"] == (
         "similar_partial_non_representative"
     )
+
+
+def test_same_content_unions_member_captions(tmp_path: Path) -> None:
+    """같은 콘텐츠면 비대표 장 설명이 대표 본문에 합쳐진다."""
+    from kakao_import.caption_sep import ROOM_ADD_SEPARATOR
+
+    db = tmp_path / "union.db"
+    init_schema(db)
+    settings = _settings(tmp_path, db)
+    photos = settings.export_root / "photos"
+    photos.mkdir(parents=True)
+    (photos / "a.jpg").write_bytes(b"a")
+    (photos / "b.jpg").write_bytes(b"b")
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        batch_id = conn.execute(
+            "INSERT INTO import_batch (root_rel, started_at, status) VALUES ('raw', datetime('now'), 'done')"
+        ).lastrowid
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="a" * 64)
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="b" * 64)
+        _insert_exact_group(conn, p1, "a" * 64)
+        _insert_exact_group(conn, p2, "b" * 64)
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "a" * 64)
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "b" * 64)
+        chat_id = conn.execute(
+            """
+            INSERT INTO chat_source (
+              rel_path, room_title, file_size, mtime_ns, content_sha256, encoding, last_batch_id
+            ) VALUES ('gangnamton_news/chats/room.txt', '강남턴 소식방', 1, 1, 'chatsha2', 'utf-8', ?)
+            """,
+            (batch_id,),
+        ).lastrowid
+        photo_msg1 = conn.execute(
+            """
+            INSERT INTO parsed_message (
+              chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, photo_count, line_no
+            ) VALUES (?, 2, 'photo', '반이', '2026-08-17T21:45:00', '사진', '사진', 1, 2)
+            """,
+            (chat_id,),
+        ).lastrowid
+        photo_msg2 = conn.execute(
+            """
+            INSERT INTO parsed_message (
+              chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, photo_count, line_no
+            ) VALUES (?, 12, 'photo', '반이', '2026-08-18T09:35:00', '사진', '사진', 1, 12)
+            """,
+            (chat_id,),
+        ).lastrowid
+        text1 = conn.execute(
+            """
+            INSERT INTO parsed_message (
+              chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, line_no
+            ) VALUES (?, 1, 'text', '반이', '2026-08-17T21:44:00', '주간일정 앞글', '주간일정 앞글', 1)
+            """,
+            (chat_id,),
+        ).lastrowid
+        text2 = conn.execute(
+            """
+            INSERT INTO parsed_message (
+              chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, line_no
+            ) VALUES (?, 13, 'text', '반이', '2026-08-18T09:35:00', '다음날 앨범 설명', '다음날 앨범 설명', 13)
+            """,
+            (chat_id,),
+        ).lastrowid
+        g1 = conn.execute(
+            """
+            INSERT INTO image_group (batch_id, chat_id, group_key, confidence, review_required, match_reason)
+            VALUES (?, ?, 'g1', 'high', 0, 't')
+            """,
+            (batch_id, chat_id),
+        ).lastrowid
+        g2 = conn.execute(
+            """
+            INSERT INTO image_group (batch_id, chat_id, group_key, confidence, review_required, match_reason)
+            VALUES (?, ?, 'g2', 'high', 0, 't')
+            """,
+            (batch_id, chat_id),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO photo_message_assignment (
+              batch_id, group_id, photo_id, message_id, slot_index, confidence, match_reason, review_required
+            ) VALUES (?, ?, ?, ?, 0, 'high', 't', 0)
+            """,
+            (batch_id, g1, p1, photo_msg1),
+        )
+        conn.execute(
+            """
+            INSERT INTO photo_message_assignment (
+              batch_id, group_id, photo_id, message_id, slot_index, confidence, match_reason, review_required
+            ) VALUES (?, ?, ?, ?, 0, 'high', 't', 0)
+            """,
+            (batch_id, g2, p2, photo_msg2),
+        )
+        conn.execute(
+            "INSERT INTO group_text (group_id, message_id, seq_in_group) VALUES (?, ?, 1)",
+            (g1, text1),
+        )
+        conn.execute(
+            "INSERT INTO group_text (group_id, message_id, seq_in_group) VALUES (?, ?, 1)",
+            (g2, text2),
+        )
+        rebuild_similar_groups(conn, max_distance=10)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn, group_id=gid, decision="same_content", representative_photo_id=p1
+        )
+        conn.commit()
+
+    manifest = build_batch_manifest(settings)
+    assert manifest["item_count"] == 1
+    text = manifest["requests"][0]["item"]["matched_messages"][0]["text"]
+    assert "[단톡방: 강남턴 소식방]" in text
+    assert "주간일정 앞글" in text
+    assert "다음날 앨범 설명" in text
+    assert ROOM_ADD_SEPARATOR in text
+

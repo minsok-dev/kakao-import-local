@@ -1,6 +1,7 @@
 # [변경사유]: Phase3 — Import payload 생성 (인접/merged 메시지만, 절대경로 금지)
 # [변경사유]: Phase 4.2+ — similar 이후 채팅 매칭 묶음을 main+sub_images 1 request로 붕괴
 # [변경사유]: 실제 붕괴는 KakaoTalk `_01` 동일 시각 스템만 — 연속 단독 사진 제외
+# [변경사유]: same_content/partial 멤버 캡션 union + 단톡방 헤더·채팅분리 구분선
 """서버 Import용 payload 빌더."""
 
 from __future__ import annotations
@@ -13,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from kakao_import.config import PROJECT_ROOT, Settings
-from kakao_import.caption_sep import join_texts_by_room
+from kakao_import.caption_build import (
+    build_caption_for_photos,
+    similar_union_member_ids,
+    union_captions_for_photo_ids,
+)
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.photo_name import kakao_album_stem_and_seq
@@ -49,16 +54,55 @@ def ensure_client_instance_id() -> str:
     return value
 
 
-def _idempotency_key(client_id: str, sha256: str, local_item_id: str) -> str:
-    raw = f"{client_id}|{sha256}|{local_item_id}".encode()
+def _idempotency_key(media_fp: str, caption_fp: str) -> str:
+    """[변경사유]: photo_id 제거 — 미디어+캡션 지문만으로 동일 요청 인식."""
+    raw = f"kakao:upload:v1:{media_fp}:{caption_fp}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 
-def _bundle_idempotency_key(client_id: str, member_shas: list[str]) -> str:
-    """묶음 멤버 SHA 집합이 같으면 동일 멱등키."""
-    joined = "|".join(sorted(s.lower() for s in member_shas))
-    raw = f"{client_id}|bundle|{joined}".encode()
-    return hashlib.sha256(raw).hexdigest()
+def caption_fingerprint(matched_messages: list[Any] | None) -> str:
+    """캡션 지문. 날짜·본문은 유지하고 문자열만 이어 해시."""
+    parts: list[str] = []
+    for m in matched_messages or []:
+        if isinstance(m, dict):
+            parts.append(str(m.get("text") or ""))
+        else:
+            parts.append(str(m or ""))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def media_fingerprint(main_sha: str, member_shas: list[str] | None = None) -> str:
+    """단일 = source SHA. 묶음 1차 = 정렬 멤버 SHA 집합."""
+    main = str(main_sha or "").strip().lower()
+    extra = [str(s).strip().lower() for s in (member_shas or []) if str(s).strip()]
+    shas = [s for s in ([main] + extra) if len(s) == 64]
+    uniq = sorted(set(shas))
+    if len(uniq) <= 1:
+        return main
+    joined = "|".join(uniq)
+    return hashlib.sha256(f"bundle|{joined}".encode()).hexdigest()
+
+
+def assign_item_idempotency(item: dict[str, Any]) -> None:
+    """최종 캡션·묶음 반영 후 멱등키 기록."""
+    sha = str(item.get("sha256") or "").strip().lower()
+    member = [sha]
+    for s in item.get("sub_images") or []:
+        if isinstance(s, dict):
+            member.append(str(s.get("sha256") or "").strip().lower())
+    media_fp = media_fingerprint(sha, member)
+    cap_fp = caption_fingerprint(item.get("matched_messages") if isinstance(item.get("matched_messages"), list) else [])
+    meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+    meta["idempotency_key"] = _idempotency_key(media_fp, cap_fp)
+    meta["media_fingerprint"] = media_fp
+    meta["caption_fingerprint"] = cap_fp
+    item["_meta"] = meta
+
+
+def _bundle_idempotency_key(member_shas: list[str], caption_fp: str) -> str:
+    """묶음 멤버 SHA 집합 + 캡션."""
+    media_fp = media_fingerprint(member_shas[0] if member_shas else "", member_shas)
+    return _idempotency_key(media_fp, caption_fp)
 
 
 def _fingerprint_message(sent_at: str, text: str) -> str:
@@ -337,7 +381,10 @@ def _attach_bundle_to_main(
         }
         for s in subs
     ]
-    main_meta["idempotency_key"] = _bundle_idempotency_key(client_id, member_shas)
+    main_meta["idempotency_key"] = _bundle_idempotency_key(
+        member_shas,
+        caption_fingerprint(main.get("matched_messages") if isinstance(main.get("matched_messages"), list) else []),
+    )
     main_meta["bundle"] = {
         "group_id": gid,
         "group_key": str(gc0.get("group_key") or ""),
@@ -524,88 +571,37 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
 
             matched: list[dict[str, Any]] = []
             merge_decision = row["merge_decision"]
-            if merge_decision in ("merged", "collapse") and row["merged_text"]:
+            # [변경사유]: 캡션은 group_text+exact SHA 복사본을 매번 조립
+            #   (단톡방 헤더·채팅분리 구분선). 저장된 merged_text 는 fallback 만.
+            text = build_caption_for_photos(conn, [photo_id])
+            if (
+                not text
+                and merge_decision in ("merged", "collapse")
+                and row["merged_text"]
+            ):
                 text = str(row["merged_text"])
-                if is_attachment_marker_text(text):
-                    decision = "upload_one"
-                    text_relation = "same"
-                else:
-                    matched.append(
-                        {
-                            "sent_at": "",
-                            "text": text,
-                            "message_fingerprint": _fingerprint_message("", text),
-                        }
-                    )
-                    decision = "collapse" if merge_decision == "collapse" else "upload_one"
-                    text_relation = "collapse" if merge_decision == "collapse" else "merged"
-            elif merge_decision == "review":
-                # [변경사유]: review 건은 payload에 넣되 decision=partial 로 표시
+            if text and is_attachment_marker_text(text):
+                text = ""
+            if text:
+                matched.append(
+                    {
+                        "sent_at": "",
+                        "text": text,
+                        "message_fingerprint": _fingerprint_message("", text),
+                    }
+                )
+            if merge_decision == "review":
                 decision = "partial"
                 text_relation = "conflict"
-                srcs = conn.execute(
-                    """
-                    SELECT body_raw, abs_time FROM text_merge_source
-                    WHERE merge_id = ? ORDER BY seq_in_source
-                    """,
-                    (row["merge_id"],),
-                ).fetchall()
-                for s in srcs:
-                    t = str(s["body_raw"] or "")
-                    at = str(s["abs_time"] or "")
-                    if not t.strip():
-                        continue
-                    matched.append(
-                        {
-                            "sent_at": at,
-                            "text": t,
-                            "message_fingerprint": _fingerprint_message(at, t),
-                        }
-                    )
+            elif merge_decision == "collapse" and text:
+                decision = "collapse"
+                text_relation = "collapse"
+            elif merge_decision == "merged" and text:
+                decision = "upload_one"
+                text_relation = "merged"
             else:
                 decision = "upload_one"
                 text_relation = "same"
-                # [변경사유]: assignment 의 photo 메시지(body='사진')는 caption 후보에서 제외
-                #   설명은 group_text(text) 만 사용
-                # [변경사유]: multi_room — chat_id 바뀌면 ADD 구분선으로 한 본문에 합침
-                msgs = conn.execute(
-                    """
-                    SELECT pm.chat_id AS chat_id, pm.abs_time AS abs_time,
-                           pm.body_raw AS body_raw, pm.msg_kind AS msg_kind
-                    FROM photo_message_assignment a
-                    JOIN image_group ig ON ig.id = a.group_id
-                    JOIN group_text gt ON gt.group_id = ig.id
-                    JOIN parsed_message pm ON pm.id = gt.message_id
-                    WHERE a.photo_id = ?
-                      AND pm.msg_kind = 'text'
-                    ORDER BY gt.seq_in_group, pm.abs_time
-                    """,
-                    (photo_id,),
-                ).fetchall()
-                parts: list[dict[str, Any]] = []
-                for m in msgs:
-                    t = str(m["body_raw"] or "")
-                    if not t.strip() or is_attachment_marker_text(t):
-                        continue
-                    parts.append(
-                        {
-                            "chat_id": int(m["chat_id"])
-                            if m["chat_id"] is not None
-                            else None,
-                            "body_raw": t,
-                            "abs_time": str(m["abs_time"] or ""),
-                        }
-                    )
-                joined = join_texts_by_room(parts)
-                if joined:
-                    at0 = str(parts[0].get("abs_time") or "") if parts else ""
-                    matched.append(
-                        {
-                            "sent_at": at0,
-                            "text": joined,
-                            "message_fingerprint": _fingerprint_message(at0, joined),
-                        }
-                    )
 
             local_item_id = f"photo:{photo_id}:{sha[:16]}"
             item = {
@@ -621,9 +617,9 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                 "_meta": {
                     "file_name": row["file_name"],
                     "photo_id": photo_id,
-                    "idempotency_key": _idempotency_key(client_id, sha, local_item_id),
                 },
             }
+            assign_item_idempotency(item)
             items.append(item)
 
         photo_ids = [
@@ -642,9 +638,39 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
                 meta["group_candidate"] = grouped_map[pid]
         policy_result = _apply_similar_policy(items, similar_map)
         items = policy_result["items"]
+        # [변경사유]: same_content/partial 묶음 — 스킵 멤버 설명을 대표 본문에 union
+        for it in items:
+            meta = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
+            pid = int(meta.get("photo_id") or 0)
+            sim = similar_map.get(pid)
+            member_ids = similar_union_member_ids(conn, sim) if sim else None
+            if not member_ids or len(member_ids) < 2:
+                continue
+            unioned = union_captions_for_photo_ids(conn, member_ids)
+            if not unioned:
+                continue
+            it["matched_messages"] = [
+                {
+                    "sent_at": "",
+                    "text": unioned,
+                    "message_fingerprint": _fingerprint_message("", unioned),
+                }
+            ]
+            hints = it.get("match_hints")
+            if isinstance(hints, dict):
+                hints["text_relation"] = "similar_union"
+            log.info(
+                "similar caption union photo_id=%s members=%s chars=%s",
+                pid,
+                len(member_ids),
+                len(unioned),
+            )
         # [변경사유]: Phase 4.2+ — similar 필터 후 채팅 묶음 붕괴 (limit 전에 적용)
         bundle_result = collapse_grouped_photo_bundles(items, client_id=client_id)
         items = bundle_result["items"]
+        # [변경사유]: union·묶음 이후 최종 캡션으로 멱등키 재계산
+        for it in items:
+            assign_item_idempotency(it)
         if limit is not None and len(items) > limit:
             items = items[:limit]
 
@@ -700,6 +726,11 @@ def build_batch_manifest(
             "file_rel": it["rel_path"],
             "file_name": meta.get("file_name"),
         }
+        # [변경사유]: 장부에 media/caption 지문 저장 — caption-only 판별용
+        if meta.get("media_fingerprint"):
+            req["media_fingerprint"] = meta["media_fingerprint"]
+        if meta.get("caption_fingerprint"):
+            req["caption_fingerprint"] = meta["caption_fingerprint"]
         if sub_rels:
             req["sub_file_rels"] = sub_rels
             req["sub_file_names"] = list(meta.get("sub_file_names") or [])

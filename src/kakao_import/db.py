@@ -19,14 +19,8 @@ SCHEMA_SQL_P2B = PROJECT_ROOT / "sql" / "003_phase2_manual_undo.sql"
 SCHEMA_SQL_P4 = PROJECT_ROOT / "sql" / "004_phase4_similar_group.sql"
 SCHEMA_SQL_P41 = PROJECT_ROOT / "sql" / "005_phase41_partial_subgroup.sql"
 SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
-
-log = get_logger(__name__)
-SCHEMA_SQL = PROJECT_ROOT / "sql" / "001_init_schema.sql"
-SCHEMA_SQL_P2 = PROJECT_ROOT / "sql" / "002_phase2_text_merge.sql"
-SCHEMA_SQL_P2B = PROJECT_ROOT / "sql" / "003_phase2_manual_undo.sql"
-SCHEMA_SQL_P4 = PROJECT_ROOT / "sql" / "004_phase4_similar_group.sql"
-SCHEMA_SQL_P41 = PROJECT_ROOT / "sql" / "005_phase41_partial_subgroup.sql"
-SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
+# [변경사유]: 장부 fingerprint/ocr_idx/거부 캐시
+SCHEMA_SQL_LEDGER_FP = PROJECT_ROOT / "sql" / "007_ledger_fingerprint.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -79,8 +73,32 @@ def _apply_phase41_partial_columns(conn: sqlite3.Connection) -> None:
             "INTEGER NOT NULL DEFAULT 0"
         )
         log.info("schema add column is_subgroup_rep")
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '6')"
+        )
+
+
+def _apply_ledger_fingerprint_columns(conn: sqlite3.Connection) -> None:
+    """007: caption/ocr/거부 컬럼 (이미 있으면 skip)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(uploaded_sha_ledger)").fetchall()}
+    if not cols:
+        return
+    wanted = (
+        ("media_fingerprint", "TEXT"),
+        ("caption_fingerprint", "TEXT"),
+        ("ocr_idx", "INTEGER"),
+        ("result_type", "TEXT"),
+        ("rejected", "INTEGER NOT NULL DEFAULT 0"),
+        ("rejected_at", "TEXT"),
+        ("asset_ids", "TEXT"),
+    )
+    for name, decl in wanted:
+        if name in cols:
+            continue
+        conn.execute(f"ALTER TABLE uploaded_sha_ledger ADD COLUMN {name} {decl}")
+        log.info("schema add column uploaded_sha_ledger.%s", name)
     conn.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '6')"
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '8')"
     )
 
 
@@ -110,6 +128,9 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         if SCHEMA_SQL_LEDGER.is_file():
             log.info("init_schema sql=%s", SCHEMA_SQL_LEDGER.name)
             conn.executescript(SCHEMA_SQL_LEDGER.read_text(encoding="utf-8"))
+        # [변경사유]: 장부 fingerprint/ocr_idx/거부 캐시
+        log.info("init_schema sql=%s (guarded)", SCHEMA_SQL_LEDGER_FP.name)
+        _apply_ledger_fingerprint_columns(conn)
         # [변경사유]: 포스터 분류 테이블 — exact_sha_member 와 분리
         ensure_poster_schema(conn)
         conn.commit()

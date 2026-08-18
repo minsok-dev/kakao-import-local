@@ -11,8 +11,10 @@ from kakao_import.payload import (
     MAX_UPLOAD_FILE_BYTES,
     _fingerprint_message,
     _idempotency_key,
+    caption_fingerprint,
     ensure_client_instance_id,
     exceeds_ingress_limit,
+    media_fingerprint,
 )
 
 
@@ -23,11 +25,20 @@ def test_idempotency_key_stable(tmp_path: Path, monkeypatch) -> None:
     )
     cid = ensure_client_instance_id()
     assert ensure_client_instance_id() == cid
-    k1 = _idempotency_key(cid, "a" * 64, "photo:1")
-    k2 = _idempotency_key(cid, "a" * 64, "photo:1")
+    media = "a" * 64
+    cap = caption_fingerprint([{"text": "hello"}])
+    k1 = _idempotency_key(media, cap)
+    k2 = _idempotency_key(media, cap)
     assert k1 == k2
     assert len(k1) == 64
-    assert k1 == hashlib.sha256(f"{cid}|{'a' * 64}|photo:1".encode()).hexdigest()
+    assert k1 == hashlib.sha256(f"kakao:upload:v1:{media}:{cap}".encode()).hexdigest()
+    # [변경사유]: photo_id 가 키에 들어가면 안 됨
+    assert k1 != _idempotency_key(media, caption_fingerprint([{"text": "hello2"}]))
+
+
+def test_media_fingerprint_bundle_order_independent() -> None:
+    a, b = "a" * 64, "b" * 64
+    assert media_fingerprint(a, [b, a]) == media_fingerprint(b, [a, b])
 
 
 def test_message_fingerprint() -> None:

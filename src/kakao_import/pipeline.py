@@ -98,6 +98,55 @@ def rel_under(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
+def latest_chat_exports(chats_dir: Path) -> list[Path]:
+    """
+    방별 chats 에서 최신 txt 1개만 선택.
+
+    [변경사유]: 카카오 대화 export 는 전체 이력 스냅샷이라 같은 방 txt가 여러 개면
+    거의 같은 대화를 반복 파싱하게 된다. 최신 파일 1개만 SSOT로 사용한다.
+    """
+    txts = sorted(p for p in chats_dir.glob("*.txt") if p.is_file())
+    if not txts:
+        return []
+
+    def sort_key(path: Path) -> tuple[int, str, int]:
+        parsed = parse_kakaotalk_filename(path.name)
+        if parsed.ok and parsed.name_time is not None:
+            ms = parsed.name_time.microsecond // 1000
+            return (1, parsed.name_time.strftime("%Y%m%d%H%M%S") + f"{ms:03d}", parsed.sequence)
+        # [변경사유]: 파일명이 비표준이면 최후수단으로 이름 정렬
+        return (0, path.name, 0)
+
+    latest = max(txts, key=sort_key)
+    return [latest]
+
+
+def _delete_room_chat_sources(conn, root: Path, room_id: str, keep_rel: str | None) -> int:
+    """
+    선택되지 않은 같은 방 chat_source 삭제.
+
+    [변경사유]: 최신 txt 1개만 쓰는 정책에서 과거 export 의 parsed_message 가
+    DB에 남아 매칭에 섞이지 않도록 ON DELETE CASCADE 로 같이 제거한다.
+    """
+    if room_id == LEGACY_ROOM_ID:
+        prefix = "chats/"
+    else:
+        prefix = f"{room_id}/chats/"
+    rows = conn.execute(
+        "SELECT id, rel_path FROM chat_source WHERE rel_path LIKE ?",
+        (prefix + "%",),
+    ).fetchall()
+    deleted = 0
+    keep = (keep_rel or "").replace("\\", "/")
+    for row in rows:
+        rel = str(row["rel_path"] or "").replace("\\", "/")
+        if keep and rel == keep:
+            continue
+        conn.execute("DELETE FROM chat_source WHERE id = ?", (int(row["id"]),))
+        deleted += 1
+    return deleted
+
+
 def cmd_init(settings: Settings, *, reset: bool = False) -> None:
     """DB 초기화."""
     init_schema(settings.db_path, reset=reset)
@@ -171,7 +220,19 @@ def cmd_parse(settings: Settings, root: Path | None = None) -> dict[str, Any]:
             if not chats_dir.is_dir():
                 continue
             log.info("parse room=%s chats_dir=%s", room_id, chats_dir)
-            for path in sorted(chats_dir.glob("*.txt")):
+            selected = latest_chat_exports(chats_dir)
+            if not selected:
+                continue
+            selected_rel = rel_under(root, selected[0])
+            deleted = _delete_room_chat_sources(conn, root, room_id, selected_rel)
+            if deleted:
+                log.info(
+                    "parse room=%s dropped_old_chat_exports=%s keep=%s",
+                    room_id,
+                    deleted,
+                    selected_rel,
+                )
+            for path in selected:
                 result = parse_chat_file(path)
                 st = path.stat()
                 rel = rel_under(root, path)
@@ -455,16 +516,36 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
     bundle = TextBundle(photo_id=photo_id)
     rows = conn.execute(
         """
-        SELECT m.id AS message_id, m.chat_id, m.body_raw, m.body_norm, m.abs_time, gt.seq_in_group
+        SELECT m.id AS message_id, m.chat_id, m.body_raw, m.body_norm, m.abs_time,
+               m.seq AS msg_seq, cs.room_title, cs.rel_path AS chat_rel_path,
+               gt.seq_in_group,
+               (
+                 SELECT MIN(pm2.seq)
+                 FROM photo_message_assignment a2
+                 JOIN parsed_message pm2 ON pm2.id = a2.message_id
+                 WHERE a2.group_id = a.group_id
+                   AND a2.message_id IS NOT NULL
+               ) AS first_photo_seq
         FROM photo_message_assignment a
         JOIN group_text gt ON gt.group_id = a.group_id
         JOIN parsed_message m ON m.id = gt.message_id
+        JOIN chat_source cs ON cs.id = m.chat_id
         WHERE a.photo_id = ?
         ORDER BY gt.seq_in_group
         """,
         (photo_id,),
     ).fetchall()
+    log.info(
+        "text_bundle photo_id=%s rows=%s sql=group_text+first_photo_seq",
+        photo_id,
+        len(rows),
+    )
     for r in rows:
+        first_seq = r["first_photo_seq"]
+        msg_seq = r["msg_seq"]
+        position = None
+        if first_seq is not None and msg_seq is not None:
+            position = "before" if int(msg_seq) < int(first_seq) else "after"
         bundle.parts.append(
             {
                 "message_id": r["message_id"],
@@ -472,6 +553,9 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
                 "body_raw": r["body_raw"],
                 "body_norm": r["body_norm"],
                 "abs_time": r["abs_time"],
+                "room_title": r["room_title"],
+                "chat_rel_path": r["chat_rel_path"],
+                "position": position,
             }
         )
     return bundle

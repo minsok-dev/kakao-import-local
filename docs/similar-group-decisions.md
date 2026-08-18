@@ -142,9 +142,13 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 
 ## 하지 않음 (명시)
 
-- **자동 병합 없음** — caption / SNS / 서버 콘텐츠를 로컬 Similar가 자동으로 합치지 않음  
-- **자동 삭제 없음** — 디스크 파일·로컬 DB 멤버 행을 삭제하지 않음  
+- **자동 삭제 없음** — 디스크 파일·로컬 DB 멤버 행을 삭제하지 않음
 - similarity는 **업로드 후보 정리**일 뿐, 서버 Exact / Similar hold / SNS merge를 **대체하지 않음**
+- 서버 콘텐츠 행을 로컬 Similar가 합치지 않음
+
+<!-- [변경사유]: same_content/partial 업로드 캡션은 멤버 설명을 union (파일 병합 아님) -->
+업로드 본문: `same_content`·`partial` 묶음은 멤버들의 채팅 설명을 **대표 1장 payload에 합쳐** 올린다.
+exact SHA(바이트 동일)와 같이 중복 본문은 1회만, 방 사이는 ADD 구분선.
 
 ## 전송 전 vs 전송 후
 

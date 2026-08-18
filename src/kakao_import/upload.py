@@ -740,13 +740,21 @@ def cmd_upload(
             )
             fields = response_ledger_fields(resp)
             rec_sha = fields.get("source_sha256") or source_sha
+            next_val = fields.get("next_val")
             if rec_sha:
+                # [변경사유]: ocr_idx·거부·지문을 장부에 남겨 caption-only/재실행에 사용
                 record_uploaded_sha(
                     settings.db_path,
                     source_sha256=rec_sha,
                     request_idx=fields.get("request_idx"),
-                    next_val=fields.get("next_val"),
+                    next_val=next_val,
                     final_sha_prefix=fields.get("final_sha_prefix"),
+                    ocr_idx=fields.get("ocr_idx"),
+                    media_fingerprint=str(req_payload.get("media_fingerprint") or "")
+                    or None,
+                    caption_fingerprint=str(req_payload.get("caption_fingerprint") or "")
+                    or None,
+                    rejected=next_val == "already_rejected",
                 )
         except Exception as e:  # noqa: BLE001 — 배치 계속
             results.append({"ok": False, "error": str(e), "rel": rel})

@@ -1,4 +1,5 @@
-# [변경사유]: caption-only ledger — 이미 올린 source SHA 기록·조회
+# [변경사유]: caption-only uploaded_sha_ledger — 이미 올린 source SHA 기록·조회
+# [변경사유]: media/caption 지문·ocr_idx·거부 캐시 (ingest-dedup-reject-plan)
 """로컬 uploaded_sha_ledger (서버 exact SSOT, 장부는 대역폭 힌트만)."""
 
 from __future__ import annotations
@@ -20,12 +21,16 @@ def _has_ledger(conn: sqlite3.Connection) -> bool:
     return bool(row)
 
 
+def _ledger_cols(conn: sqlite3.Connection) -> set[str]:
+    return {str(r[1]) for r in conn.execute("PRAGMA table_info(uploaded_sha_ledger)")}
+
+
 def normalize_sha(sha: str | None) -> str:
     return str(sha or "").strip().lower()
 
 
 def is_uploaded_sha(db_path: Path, source_sha256: str) -> bool:
-    """장부에 있으면 caption-only 후보."""
+    """장부에 있으면 caption-only 후보 (거부 캐시여도 SHA 조회는 됨)."""
     sha = normalize_sha(source_sha256)
     if len(sha) != 64:
         return False
@@ -46,6 +51,10 @@ def record_uploaded_sha(
     request_idx: int | None = None,
     next_val: str | None = None,
     final_sha_prefix: str | None = None,
+    ocr_idx: int | None = None,
+    caption_fingerprint: str | None = None,
+    media_fingerprint: str | None = None,
+    rejected: bool = False,
 ) -> None:
     """성공 업로드 후 source SHA 기록 (upsert)."""
     sha = normalize_sha(source_sha256)
@@ -55,25 +64,65 @@ def record_uploaded_sha(
         if not _has_ledger(conn):
             log.warning("uploaded_sha_ledger missing — run init_schema")
             return
-        conn.execute(
-            """
-            INSERT INTO uploaded_sha_ledger (
-              source_sha256, request_idx, next, final_sha_prefix, uploaded_at
-            ) VALUES (?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(source_sha256) DO UPDATE SET
-              request_idx = excluded.request_idx,
-              next = excluded.next,
-              final_sha_prefix = excluded.final_sha_prefix,
-              uploaded_at = datetime('now')
-            """,
-            (sha, request_idx, next_val, final_sha_prefix),
-        )
+        cols = _ledger_cols(conn)
+        media_fp = (media_fingerprint or sha).strip().lower() or sha
+        cap_fp = (caption_fingerprint or "").strip().lower() or None
+        if "ocr_idx" in cols:
+            conn.execute(
+                """
+                INSERT INTO uploaded_sha_ledger (
+                  source_sha256, request_idx, next, final_sha_prefix, uploaded_at,
+                  media_fingerprint, caption_fingerprint, ocr_idx, result_type,
+                  rejected, rejected_at
+                ) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?,
+                  CASE WHEN ? THEN datetime('now') ELSE NULL END)
+                ON CONFLICT(source_sha256) DO UPDATE SET
+                  request_idx = excluded.request_idx,
+                  next = excluded.next,
+                  final_sha_prefix = excluded.final_sha_prefix,
+                  uploaded_at = datetime('now'),
+                  media_fingerprint = excluded.media_fingerprint,
+                  caption_fingerprint = excluded.caption_fingerprint,
+                  ocr_idx = excluded.ocr_idx,
+                  result_type = excluded.result_type,
+                  rejected = excluded.rejected,
+                  rejected_at = excluded.rejected_at
+                """,
+                (
+                    sha,
+                    request_idx,
+                    next_val,
+                    final_sha_prefix,
+                    media_fp,
+                    cap_fp,
+                    ocr_idx,
+                    next_val,
+                    1 if rejected else 0,
+                    1 if rejected else 0,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO uploaded_sha_ledger (
+                  source_sha256, request_idx, next, final_sha_prefix, uploaded_at
+                ) VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(source_sha256) DO UPDATE SET
+                  request_idx = excluded.request_idx,
+                  next = excluded.next,
+                  final_sha_prefix = excluded.final_sha_prefix,
+                  uploaded_at = datetime('now')
+                """,
+                (sha, request_idx, next_val, final_sha_prefix),
+            )
         conn.commit()
     log.info(
-        "ledger record sha_prefix=%s request_idx=%s next=%s",
+        "ledger record sha_prefix=%s request_idx=%s next=%s ocr_idx=%s rejected=%s",
         sha[:12],
         request_idx,
         next_val,
+        ocr_idx,
+        rejected,
     )
 
 
@@ -105,9 +154,15 @@ def response_ledger_fields(response: dict[str, Any] | None) -> dict[str, Any]:
         request_idx = int(req) if req is not None else None
     except (TypeError, ValueError):
         request_idx = None
+    ocr_raw = data.get("ocr_idx")
+    try:
+        ocr_idx = int(ocr_raw) if ocr_raw is not None else None
+    except (TypeError, ValueError):
+        ocr_idx = None
     return {
         "request_idx": request_idx,
         "next_val": str(data.get("next") or "") or None,
         "final_sha_prefix": str(data.get("final_sha256_prefix") or "") or None,
         "source_sha256": normalize_sha(str(data.get("source_sha256") or "")),
+        "ocr_idx": ocr_idx,
     }

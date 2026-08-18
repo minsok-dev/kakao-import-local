@@ -14,6 +14,7 @@
 | **2** | — | 텍스트 merge (safe/balanced/auto) | ✅ |
 | **3** | — | Import·서버 exact·OCR/GPT | ✅ 기능 (운영 이슈→3.5) |
 | **3.5** | **지금** | caption replay · empty gate · file_missing · UTF-8 | **최우선** |
+| **3.6** | 대기 | SHA 재사용 · similar_hold 자산화 · 거부 목록 | **v0.2** — [ingest-dedup-reject-plan.md](./ingest-dedup-reject-plan.md). 진행 지시 후 착수. 거부 관리 화면은 이후 |
 | **4** | 이후 | similar 그룹 UI (합침/분리) | **3.5 전 착수 금지** |
 | **5** | 마지막 | 제한 자동 승인 | 이후 |
 

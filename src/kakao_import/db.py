@@ -10,6 +10,15 @@ from typing import Any
 
 from kakao_import.config import PROJECT_ROOT
 from kakao_import.logging_util import get_logger
+from kakao_import.poster_schema import ensure_poster_schema
+
+log = get_logger(__name__)
+SCHEMA_SQL = PROJECT_ROOT / "sql" / "001_init_schema.sql"
+SCHEMA_SQL_P2 = PROJECT_ROOT / "sql" / "002_phase2_text_merge.sql"
+SCHEMA_SQL_P2B = PROJECT_ROOT / "sql" / "003_phase2_manual_undo.sql"
+SCHEMA_SQL_P4 = PROJECT_ROOT / "sql" / "004_phase4_similar_group.sql"
+SCHEMA_SQL_P41 = PROJECT_ROOT / "sql" / "005_phase41_partial_subgroup.sql"
+SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
 
 log = get_logger(__name__)
 SCHEMA_SQL = PROJECT_ROOT / "sql" / "001_init_schema.sql"
@@ -101,6 +110,8 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         if SCHEMA_SQL_LEDGER.is_file():
             log.info("init_schema sql=%s", SCHEMA_SQL_LEDGER.name)
             conn.executescript(SCHEMA_SQL_LEDGER.read_text(encoding="utf-8"))
+        # [변경사유]: 포스터 분류 테이블 — exact_sha_member 와 분리
+        ensure_poster_schema(conn)
         conn.commit()
 
 

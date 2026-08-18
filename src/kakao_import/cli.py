@@ -484,5 +484,123 @@ def similar_review_cmd(
     )
 
 
+# [변경사유]: 포스터 분류 CLI — extra 없으면 train만 실패, classify는 no-op
+@main.command("poster-train")
+@click.pass_context
+def poster_train_cmd(ctx: click.Context) -> None:
+    """dataset/poster·non_poster 로 로지스틱 학습. 활성 모델은 바꾸지 않음."""
+    from kakao_import.poster_train import cmd_poster_train
+
+    out = cmd_poster_train()
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.UsageError(str(out.get("error") or "poster-train failed"))
+
+
+@main.command("poster-classify")
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=8766, show_default=True)
+@click.option("--no-browser", is_flag=True, help="리뷰 화면 브라우저 자동 실행 안 함")
+@click.option("--no-review", is_flag=True, help="분류 후 poster-review UI를 띄우지 않음")
+@click.pass_context
+def poster_classify_cmd(
+    ctx: click.Context,
+    root: Path | None,
+    host: str,
+    port: int,
+    no_browser: bool,
+    no_review: bool,
+) -> None:
+    """활성 모델로 photo_file 판정 후, 기본으로 poster-review UI까지 연다."""
+    from kakao_import.poster_classify import cmd_poster_classify
+
+    settings = ctx.obj["settings"]
+    target = root or settings.export_root
+    out = cmd_poster_classify(settings, target)
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "poster-classify failed"))
+    if no_review:
+        return
+    click.echo(
+        "Poster review UI. "
+        f"Open http://{host}:{port}/  - Ctrl+C to stop."
+    )
+    pipe.cmd_poster_review(
+        settings,
+        Path(target) if target is not None else None,
+        host=host,
+        port=port,
+        open_browser=not no_browser,
+    )
+
+
+@main.command("poster-review")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=8766, show_default=True)
+@click.option("--no-browser", is_flag=True, help="브라우저 자동 실행 안 함")
+@click.pass_context
+def poster_review_cmd(
+    ctx: click.Context,
+    db: Path | None,
+    root: Path | None,
+    host: str,
+    port: int,
+    no_browser: bool,
+) -> None:
+    """포스터 분류 결과를 브라우저에서 확인하고 human 라벨로 수정."""
+    settings = _settings_with_db(ctx, db)
+    target = root or settings.export_root
+    if target is None:
+        raise click.UsageError("--root 또는 KAKAO_EXPORT_ROOT 필요")
+    click.echo(
+        "Poster review UI. "
+        f"Open http://{host}:{port}/  - Ctrl+C to stop."
+    )
+    pipe.cmd_poster_review(
+        settings,
+        Path(target),
+        host=host,
+        port=port,
+        open_browser=not no_browser,
+    )
+
+
+@main.command("poster-activate")
+@click.option("--version", required=True, help="예: poster-clip-v1")
+@click.option("--force", is_flag=True, help="오제외 증가여도 강제 활성")
+@click.pass_context
+def poster_activate_cmd(ctx: click.Context, version: str, force: bool) -> None:
+    """test 오제외가 늘지 않을 때만 active-model.json 교체."""
+    from kakao_import.poster_activate import cmd_poster_activate
+
+    out = cmd_poster_activate(version=version, force=force)
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "poster-activate failed"))
+
+
+@main.command("poster-label")
+@click.option("--sha256", "sha", required=True, help="64 hex")
+@click.option(
+    "--status",
+    type=click.Choice(["poster", "uncertain", "non_poster"]),
+    required=True,
+)
+@click.option("--room-id", default=None)
+@click.pass_context
+def poster_label_cmd(ctx: click.Context, sha: str, status: str, room_id: str | None) -> None:
+    """사람 확정. 이후 모델 재실행이 덮지 않음."""
+    from kakao_import.poster_label import cmd_poster_label
+
+    out = cmd_poster_label(ctx.obj["settings"], sha256=sha, status=status, room_id=room_id)
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "poster-label failed"))
+
+
 if __name__ == "__main__":
     main()

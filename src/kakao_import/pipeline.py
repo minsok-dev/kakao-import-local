@@ -853,3 +853,24 @@ def cmd_similar_review(
         port=port,
         open_browser=open_browser,
     )
+
+
+# [변경사유]: 포스터 분류 결과를 브라우저에서 바로 검토하는 로컬 UI
+def cmd_poster_review(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8766,
+    open_browser: bool = True,
+) -> None:
+    """브라우저에서 poster 분류 결과 확인 + human 라벨 저장."""
+    from kakao_import.poster_review import run_review_server
+
+    run_review_server(
+        settings,
+        root=root or settings.export_root,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+    )

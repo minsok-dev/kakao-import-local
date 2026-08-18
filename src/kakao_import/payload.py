@@ -487,9 +487,19 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             """
         ).fetchall()
 
+        from kakao_import.poster_schema import excluded_poster_shas
+
+        poster_skip = excluded_poster_shas(conn)
+        if poster_skip:
+            log.info("upload skip poster_non_poster shas=%s", len(poster_skip))
+
         for row in rows:
             sha = (row["sha256"] or "").lower()
             if not sha or len(sha) != 64:
+                continue
+            # [변경사유]: 포스터 분류 non_poster 만 제외. exact SHA 제외와 AND
+            if sha in poster_skip:
+                log.info("upload skip poster-classified sha=%s", sha[:12])
                 continue
             photo_id = int(row["photo_id"])
             rel_path = str(row["rel_path"] or "").replace("\\", "/")

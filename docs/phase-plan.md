@@ -34,3 +34,7 @@ Phase 1 완료 = [golden-esencia-20260724-0050.md](./golden-esencia-20260724-005
 - watcher / 자동 승인 (데이터 신뢰성 확보 전)
 - PC 카톡 UI 수집은 이 레포가 아님 — [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md)
 - Exact/similar/신규 OCR happy path 변경 (3.5는 안정화만)
+
+## 병렬: 포스터 분류 (Phase 번호를 쓰지 않음)
+
+3.5·4를 막지 않음. 계약 [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발 [poster-classifier-dev.md](./poster-classifier-dev.md) (C0~C3).

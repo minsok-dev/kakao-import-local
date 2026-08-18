@@ -24,6 +24,14 @@ data/
 output/
 *.log
 
+# [변경사유]: 포스터 분류 — 학습 원본 이미지·joblib은 커밋하지 않음
+dataset/poster/**
+dataset/non_poster/**
+!dataset/poster/.gitkeep
+!dataset/non_poster/.gitkeep
+models/*.joblib
+models/active-model.json
+
 # OS / IDE
 .DS_Store
 Thumbs.db

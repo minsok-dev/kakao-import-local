@@ -13,7 +13,7 @@
 | 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지) |
 | 후속 | 수집 종료 시 `kakao-import run` + `similar-detect` **명시 호출** (폴더 watcher 아님) |
 
-관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md)
+관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md)
 
 ---
 
@@ -31,6 +31,9 @@
 ```text
 run → similar-detect → similar-review(사람) → upload --dry-run → upload --no-dry-run
 ```
+
+<!-- [변경사유]: 잡사진 제외는 수집기가 아니라 import 분류기. 계약만 있음 -->
+포스터 vs 일상 사진 분류는 수집 단계가 아니다. 계약: [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발: [poster-classifier-dev.md](./poster-classifier-dev.md) (미구현).
 
 입력은 방별 `input/raw/<room_id>/chats` + `photos`이다. 구 `chats/`+`photos/`는 `_legacy` 호환.  
 카톡이 만드는 **원본 파일명·형식**을 유지해야 한다 (리네임·재인코딩 금지).

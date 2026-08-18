@@ -21,6 +21,15 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.6",
 ]
+# [변경사유]: 포스터 분류 extra — 기본 설치에 torch를 넣지 않음 (용량)
+poster = [
+  "torch>=2.2",
+  "open_clip_torch>=2.24",
+  "scikit-learn>=1.4",
+  "pillow>=10.0",
+  "joblib>=1.3",
+  "numpy>=1.26",
+]
 # Phase 4 유사 매칭 시 backend 공용 패키지 연동용 (선택)
 # signature = [
 #   "danceinfo-image-signature @ file:../backend/packages/danceinfo_image_signature",
@@ -35,6 +44,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "poster: requires optional extra pip install -e \".[poster]\"",
+]
 
 [tool.ruff]
 line-length = 100

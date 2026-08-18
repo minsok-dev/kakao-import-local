@@ -7,6 +7,7 @@
 | 종류 | 경로 | git | 에이전트 확인 |
 |------|------|-----|----------------|
 | **원본(실명·실대화)** | `input/raw/` | ❌ gitignore | ✅ 디스크에만 있으면 Read 가능. **채팅에 붙여넣지 말 것** |
+| **포스터 분류 학습 복사본** | `dataset/poster/` · `dataset/non_poster/` | ❌ 이미지 gitignore | ✅ 분류기 C1. 원본 photos는 복사만 |
 | **마스킹 샘플(공유용)** | `fixtures/samples/<시나리오ID>/` | ✅ 가능 | ✅ 우선 검토 대상 |
 | **정답 JSON** | `fixtures/golden/<시나리오ID>.json` | ✅ | ✅ |
 

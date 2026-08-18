@@ -157,6 +157,12 @@ def rebuild_similar_groups(
         )
         """
     ).fetchall()
+    from kakao_import.poster_schema import excluded_poster_photo_ids
+
+    skip_poster_ids = excluded_poster_photo_ids(conn)
+    if skip_poster_ids:
+        rows = [r for r in rows if int(r["photo_id"]) not in skip_poster_ids]
+        log.info("similar skip poster_non_poster photos=%s", len(skip_poster_ids))
     photos = [
         PhotoSig(
             photo_id=int(r["photo_id"]),
@@ -216,6 +222,7 @@ def rebuild_similar_groups(
     return {
         "signatures": len(photos),
         "skipped_exact": skipped_exact,
+        "skipped_poster": len(skip_poster_ids),
         "groups": len(clusters),
         "members": sum(len(c.photo_ids) for c in clusters),
         "max_distance": max_distance,

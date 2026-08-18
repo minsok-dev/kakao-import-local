@@ -11,7 +11,7 @@
 | 확정 golden | [golden-esencia-20260724-0050.md](./golden-esencia-20260724-0050.md) |
 | **현재 초점** | **Phase 4.2 similar upload policy 반영** (`deferred` 차단 + dry-run/result 노출) |
 
-관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md)
+관련: [phase-plan.md](./phase-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [samples-golden-set.md](./samples-golden-set.md) · [phase05-signature-feasibility.md](./phase05-signature-feasibility.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [how-to-provide-samples.md](./how-to-provide-samples.md) · [phase3-import.md](./phase3-import.md) · [phase3-ops-stabilization.md](./phase3-ops-stabilization.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [poster-classifier-dev.md](./poster-classifier-dev.md)
 
 ---
 
@@ -419,9 +419,12 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
 ## 6. 나중에 해도 되는 것 (3.5를 막지 않음)
 
 Electron/PySide 완성형 GUI, 트레이, 시작 시 자동 실행, 멀티 PC 동기화,  
-service token 완전 자동 전송, similar 자동 통합, CLIP,  
+service token 완전 자동 전송, similar 자동 통합,  
 기존 콘텐츠 자동 보완, 대표 이미지 자동 교체, legacy 대량 백필, 운영 대시보드,  
 카카오→`tbl_ingest_raw` 통합.
+
+로컬 포스터 vs 잡사진 분류는 위 “나중” 목록이 아니라 **병렬 트랙**이다.  
+계약 [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발 [poster-classifier-dev.md](./poster-classifier-dev.md).
 
 **PC 카톡 준자동 수집**(검색·Ctrl+S·서랍 50칸·좌표 3곳·Documents→photos)은 import와 **분리**한다.  
 계약: [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md). 하이브리드(UIA+최소 좌표). 끝나면 `run`+`similar-detect`만 호출하고 upload는 similar-review 후.

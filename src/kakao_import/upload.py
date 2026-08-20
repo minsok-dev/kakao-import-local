@@ -27,6 +27,13 @@ from kakao_import.payload import (
     is_attachment_marker_text,
     write_manifest,
 )
+from kakao_import.upload_state import sync_upload_candidates
+from kakao_import.upload_state import (
+    apply_candidate_classification,
+    mark_candidate_retry,
+    mark_candidate_uploaded,
+    uploadable_candidate_keys,
+)
 
 log = get_logger(__name__)
 
@@ -139,6 +146,7 @@ def classify_upload_requests(
         meta = {
             "rel": rel,
             "local_item_id": (req_payload.get("item") or {}).get("local_item_id"),
+            "candidate_key": req_payload.get("candidate_key"),
             "sha_prefix": str((req_payload.get("item") or {}).get("sha256") or "")[:12],
             "sub_count": len(sub_rels),
         }
@@ -446,8 +454,25 @@ def cmd_upload(
     manifest = build_batch_manifest(settings, limit=limit)
     out = out_manifest or (settings.db_path.parent / "last_upload_manifest.json")
     write_manifest(manifest, out)
+    candidate_sync = sync_upload_candidates(
+        settings.db_path,
+        requests=list(manifest["requests"]),
+    )
+    actionable_requests = list(candidate_sync.get("actionable_requests") or [])
 
-    classified = classify_upload_requests(manifest["requests"], root=root)
+    classified = classify_upload_requests(actionable_requests, root=root)
+    classification_state = apply_candidate_classification(
+        settings.db_path,
+        classified=classified,
+    )
+    allowed_keys = uploadable_candidate_keys(
+        settings.db_path,
+        candidate_keys=[
+            str(r.get("candidate_key") or "")
+            for r in actionable_requests
+            if str(r.get("candidate_key") or "").strip()
+        ],
+    )
     similar_policy = manifest.get("similar_policy") or {}
     similar_skipped = list(similar_policy.get("skipped") or [])
     similar_deferred_groups = list(similar_policy.get("deferred_groups") or [])
@@ -470,7 +495,7 @@ def cmd_upload(
         summary = build_upload_summary(
             dry_run=True,
             classified=classified,
-            blocked=bool(similar_deferred_groups),
+            blocked=False,
             allow_empty_caption=not strict_adjacent,
         )
         detail = {
@@ -489,13 +514,13 @@ def cmd_upload(
             "bundle_collapsed_count": int(
                 manifest.get("bundle_collapsed_count") or 0
             ),
+            "candidate_sync": candidate_sync,
+            "classification_state": classification_state,
+            "incremental": dict(manifest.get("incremental") or {}),
             # [변경사유]: dry-run은 payload 본문 제외 — 경로·id만
             "ready_rels": [r.get("rel") for r in classified["ready"]],
-            "note": "EMPTY_CONTEXT items are uploaded by default (poster-only OK)",
+            "note": "EMPTY_CONTEXT items are uploaded by default (poster-only OK); similar_deferred items are held and skipped",
         }
-        if similar_deferred_groups:
-            detail["error"] = "SIMILAR_DEFERRED_BLOCKED"
-            detail["hint"] = "run similar-review and decide each deferred group before upload"
         write_upload_result_json(result_path, detail)
         log.info(
             "upload dry-run items=%s empty=%s missing=%s ready=%s",
@@ -511,44 +536,12 @@ def cmd_upload(
             "bundle_collapsed_count": int(
                 manifest.get("bundle_collapsed_count") or 0
             ),
+            "candidate_sync": candidate_sync,
+            "classification_state": classification_state,
             "manifest": str(out),
             "batch_id": manifest["batch_id"],
             "result_json": str(result_path),
         }
-
-    if similar_deferred_groups:
-        summary = build_upload_summary(
-            dry_run=False,
-            classified=classified,
-            blocked=True,
-            allow_empty_caption=not strict_adjacent,
-        )
-        detail = {
-            "summary": summary,
-            "error": "SIMILAR_DEFERRED_BLOCKED",
-            "hint": "run similar-review and decide each deferred group before upload",
-            "similar_deferred_groups": similar_deferred_groups,
-            "similar_skipped": similar_skipped,
-            "grouped_photo_candidates": list(
-                manifest.get("grouped_photo_candidates") or []
-            ),
-            "empty_adjacent": classified["empty_adjacent"],
-            "file_missing": classified["file_missing"],
-            "manifest": str(out),
-        }
-        write_upload_result_json(result_path, detail)
-        log.warning(
-            "upload blocked SIMILAR_DEFERRED_BLOCKED groups=%s",
-            len(similar_deferred_groups),
-        )
-        return {
-            **summary,
-            "item_count": manifest["item_count"],
-            "manifest": str(out),
-            "result_json": str(result_path),
-            "error": "SIMILAR_DEFERRED_BLOCKED",
-        }
-
     # [변경사유]: 엄격 모드(--require-adjacent)만 empty 시 전체 차단
     if classified["empty_adjacent_count"] > 0 and strict_adjacent:
         summary = build_upload_summary(
@@ -565,6 +558,8 @@ def cmd_upload(
             "file_missing": classified["file_missing"],
             "similar_skipped": similar_skipped,
             "similar_deferred_groups": similar_deferred_groups,
+            "candidate_sync": candidate_sync,
+            "classification_state": classification_state,
             "manifest": str(out),
         }
         write_upload_result_json(result_path, detail)
@@ -604,14 +599,25 @@ def cmd_upload(
         )
 
     # [변경사유]: READY + EMPTY(이미지만) 모두 전송 — file_missing만 제외
-    upload_queue: list[dict[str, Any]] = list(classified["ready"])
+    upload_queue: list[dict[str, Any]] = [
+        entry
+        for entry in classified["ready"]
+        if (
+            not str(entry.get("candidate_key") or "").strip()
+            or str(entry.get("candidate_key") or "") in allowed_keys
+        )
+    ]
     for ea in classified["empty_adjacent"]:
         rel = str(ea.get("rel") or "")
         req = next(
             (
                 r
-                for r in manifest["requests"]
+                for r in actionable_requests
                 if str(r.get("file_rel") or "").replace("\\", "/") == rel
+                and (
+                    not str(r.get("candidate_key") or "").strip()
+                    or str(r.get("candidate_key") or "") in allowed_keys
+                )
             ),
             None,
         )
@@ -638,6 +644,7 @@ def cmd_upload(
     )
     for idx, entry in enumerate(upload_queue):
         req_payload = entry["payload"]
+        candidate_key = str(req_payload.get("candidate_key") or "").strip()
         file_path = Path(entry["file_path"])
         sub_paths = [Path(p) for p in (entry.get("sub_file_paths") or [])]
         rel = str(entry.get("rel") or "")
@@ -659,6 +666,14 @@ def cmd_upload(
                     "bytes": sz,
                 }
             )
+            if candidate_key:
+                mark_candidate_retry(
+                    settings.db_path,
+                    candidate_key=candidate_key,
+                    error_code="FILE_EXCEEDS_INGRESS_LIMIT",
+                    error_message=f"main file too large: {sz}",
+                    terminal=True,
+                )
             continue
         # [변경사유]: Phase 4.2+ — sub 도 파일별 ingress 검사
         oversized_sub = False
@@ -682,6 +697,14 @@ def cmd_upload(
                         "bytes": ssz,
                     }
                 )
+                if candidate_key:
+                    mark_candidate_retry(
+                        settings.db_path,
+                        candidate_key=candidate_key,
+                        error_code="FILE_EXCEEDS_INGRESS_LIMIT",
+                        error_message=f"sub file too large: {ssz}",
+                        terminal=True,
+                    )
                 oversized_sub = True
                 break
         if oversized_sub:
@@ -756,8 +779,28 @@ def cmd_upload(
                     or None,
                     rejected=next_val == "already_rejected",
                 )
+            if candidate_key:
+                mark_candidate_uploaded(
+                    settings.db_path,
+                    candidate_key=candidate_key,
+                    request_idx=fields.get("request_idx"),
+                    ocr_idx=fields.get("ocr_idx"),
+                )
         except Exception as e:  # noqa: BLE001 — 배치 계속
             results.append({"ok": False, "error": str(e), "rel": rel})
+            if candidate_key:
+                terminal = False
+                err_code = e.__class__.__name__
+                if isinstance(e, UploadHttpError):
+                    err_code = str(e.code or f"HTTP_{e.status}")
+                    terminal = int(e.status or 0) >= 400 and int(e.status or 0) < 500
+                mark_candidate_retry(
+                    settings.db_path,
+                    candidate_key=candidate_key,
+                    error_code=err_code,
+                    error_message=str(e),
+                    terminal=terminal,
+                )
 
         # [변경사유]: 마지막 건 제외 — 장당 유휴로 frontend/OCR/similar 부하 완화
         if idx < len(upload_queue) - 1:
@@ -796,6 +839,8 @@ def cmd_upload(
         "file_missing": classified["file_missing"],
         "similar_skipped": similar_skipped,
         "similar_deferred_groups": similar_deferred_groups,
+        "candidate_sync": candidate_sync,
+        "classification_state": classification_state,
         "grouped_photo_candidates": list(manifest.get("grouped_photo_candidates") or []),
         "bundled_groups": list(manifest.get("bundled_groups") or []),
         "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
@@ -817,6 +862,8 @@ def cmd_upload(
         "item_count": len(results),
         # [변경사유]: 콘솔 한글 요약용
         "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
+        "candidate_sync": candidate_sync,
+        "classification_state": classification_state,
         "ok": ok_n,
         "fail": fail_n,
         "manifest": str(out),

@@ -23,6 +23,10 @@ from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.photo_name import kakao_album_stem_and_seq
 from kakao_import.similar_policy import upload_policy_for_decision
+from kakao_import.upload_state import (
+    load_incremental_caption_plan,
+    record_similar_policy_skips,
+)
 
 log = get_logger(__name__)
 
@@ -506,9 +510,16 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
     """
     exact SHA 대표 사진 + text_merge(있으면) / group_text 기반 인접 메시지로 items 생성.
     excluded_from_upload=1 멤버는 제외.
+    [변경사유]: 증분 — uploaded/hold 등은 caption SQL 재계산 스킵, 캐시 있으면 재사용
     """
     client_id = ensure_client_instance_id()
     items: list[dict[str, Any]] = []
+    caption_plan = load_incremental_caption_plan(settings.db_path)
+    skip_shas: set[str] = set(caption_plan.get("skip_shas") or set())
+    caption_cache: dict[str, str] = dict(caption_plan.get("caption_cache") or {})
+    rebuilt = 0
+    reused_cache = 0
+    skipped_eval = 0
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             """
@@ -548,6 +559,10 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             if sha in poster_skip:
                 log.info("upload skip poster-classified sha=%s", sha[:12])
                 continue
+            # [변경사유]: 이미 평가 완료(uploaded/hold/excluded)면 caption 재계산 생략
+            if sha in skip_shas:
+                skipped_eval += 1
+                continue
             photo_id = int(row["photo_id"])
             rel_path = str(row["rel_path"] or "").replace("\\", "/")
             # [변경사유]: 절대경로 금지 — photos/ 상대만
@@ -571,15 +586,19 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
 
             matched: list[dict[str, Any]] = []
             merge_decision = row["merge_decision"]
-            # [변경사유]: 캡션은 group_text+exact SHA 복사본을 매번 조립
-            #   (단톡방 헤더·채팅분리 구분선). 저장된 merged_text 는 fallback 만.
-            text = build_caption_for_photos(conn, [photo_id])
-            if (
-                not text
-                and merge_decision in ("merged", "collapse")
-                and row["merged_text"]
-            ):
-                text = str(row["merged_text"])
+            # [변경사유]: 증분 — caption_text_cached 재사용, 없으면 SQL 조립
+            if sha in caption_cache:
+                text = str(caption_cache.get(sha) or "")
+                reused_cache += 1
+            else:
+                text = build_caption_for_photos(conn, [photo_id])
+                rebuilt += 1
+                if (
+                    not text
+                    and merge_decision in ("merged", "collapse")
+                    and row["merged_text"]
+                ):
+                    text = str(row["merged_text"])
             if text and is_attachment_marker_text(text):
                 text = ""
             if text:
@@ -642,6 +661,10 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
         for it in items:
             meta = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
             pid = int(meta.get("photo_id") or 0)
+            sha = str(it.get("sha256") or "").strip().lower()
+            # [변경사유]: 캐시 재사용 건은 similar union SQL 도 생략
+            if sha in caption_cache:
+                continue
             sim = similar_map.get(pid)
             member_ids = similar_union_member_ids(conn, sim) if sim else None
             if not member_ids or len(member_ids) < 2:
@@ -674,6 +697,13 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
         if limit is not None and len(items) > limit:
             items = items[:limit]
 
+        # [변경사유]: similar skip/deferred 를 상태에 남겨 다음 run caption 스킵
+        policy_skip_stats = record_similar_policy_skips(
+            settings.db_path,
+            skipped=list(policy_result.get("skipped") or []),
+            deferred_groups=list(policy_result.get("deferred_groups") or []),
+        )
+
         # build_batch_manifest 에서 재사용할 수 있게 함수 속성에 저장
         build_upload_items._last_policy = {  # type: ignore[attr-defined]
             "skipped": policy_result["skipped"],
@@ -690,9 +720,21 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             ],
             "bundled_groups": bundle_result["bundled_groups"],
             "bundle_collapsed_count": bundle_result["bundle_collapsed_count"],
+            "incremental": {
+                "skip_eval": skipped_eval,
+                "reused_cache": reused_cache,
+                "rebuilt_caption": rebuilt,
+                "policy_skip_stats": policy_skip_stats,
+            },
         }
 
-    log.info("build_upload_items count=%s", len(items))
+    log.info(
+        "build_upload_items count=%s skip_eval=%s cache=%s rebuilt=%s",
+        len(items),
+        skipped_eval,
+        reused_cache,
+        rebuilt,
+    )
     return items
 
 
@@ -726,6 +768,9 @@ def build_batch_manifest(
             "file_rel": it["rel_path"],
             "file_name": meta.get("file_name"),
         }
+        # [변경사유]: 증분 업로드 상태 테이블 — media 단위 안정 key
+        if meta.get("media_fingerprint"):
+            req["candidate_key"] = f"media:{meta['media_fingerprint']}"
         # [변경사유]: 장부에 media/caption 지문 저장 — caption-only 판별용
         if meta.get("media_fingerprint"):
             req["media_fingerprint"] = meta["media_fingerprint"]
@@ -751,6 +796,7 @@ def build_batch_manifest(
         "grouped_photo_candidates": list(policy_info.get("grouped_candidates") or []),
         "bundled_groups": list(policy_info.get("bundled_groups") or []),
         "bundle_collapsed_count": int(policy_info.get("bundle_collapsed_count") or 0),
+        "incremental": dict(policy_info.get("incremental") or {}),
     }
 
 

@@ -175,7 +175,7 @@ def test_prune_missing(tmp_path: Path) -> None:
         )
 
 
-def test_cmd_upload_blocks_deferred_similar_groups(tmp_path: Path) -> None:
+def test_cmd_upload_skips_deferred_similar_groups_without_blocking(tmp_path: Path) -> None:
     from kakao_import.db import connect, init_schema
     from kakao_import.similar_detect import ensure_similar_schema, rebuild_similar_groups
 
@@ -246,10 +246,21 @@ def test_cmd_upload_blocks_deferred_similar_groups(tmp_path: Path) -> None:
         conn.commit()
 
     dry = cmd_upload(settings, root=root, dry_run=True)
-    assert dry["blocked"] is True
+    assert dry["blocked"] is False
     assert dry["SIMILAR_DEFERRED_BLOCKED"] == 1
     assert dry["READY"] == 0
 
-    blocked = cmd_upload(settings, root=root, dry_run=False)
-    assert blocked["blocked"] is True
-    assert blocked["error"] == "SIMILAR_DEFERRED_BLOCKED"
+    import os
+
+    os.environ["KAKAO_IMPORT_SESSION_COOKIE"] = "sid=test"
+    os.environ["KAKAO_IMPORT_ENDPOINT"] = "https://example.com/api/admin/contents/import"
+    try:
+        blocked = cmd_upload(settings, root=root, dry_run=False)
+    finally:
+        os.environ.pop("KAKAO_IMPORT_SESSION_COOKIE", None)
+        os.environ.pop("KAKAO_IMPORT_ENDPOINT", None)
+    assert blocked["blocked"] is False
+    # [변경사유]: 1차에서 deferred hold 기록 → 2차는 caption/policy 재평가 스킵
+    assert blocked["ok"] == 0
+    assert blocked["fail"] == 0
+    assert blocked.get("READY", 0) == 0

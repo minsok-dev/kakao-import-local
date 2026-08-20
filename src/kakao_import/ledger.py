@@ -44,6 +44,34 @@ def is_uploaded_sha(db_path: Path, source_sha256: str) -> bool:
         return bool(row)
 
 
+def has_uploaded_fingerprint(
+    db_path: Path,
+    *,
+    media_fingerprint: str,
+    caption_fingerprint: str | None = None,
+) -> bool:
+    """동일 media/caption 지문이 이미 성공 업로드 되었는지."""
+    media_fp = normalize_sha(media_fingerprint)
+    caption_fp = normalize_sha(caption_fingerprint) if caption_fingerprint else ""
+    if len(media_fp) != 64:
+        return False
+    with connect(db_path) as conn:
+        if not _has_ledger(conn):
+            return False
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM uploaded_sha_ledger
+            WHERE lower(IFNULL(media_fingerprint, '')) = ?
+              AND lower(IFNULL(caption_fingerprint, '')) = ?
+              AND IFNULL(rejected, 0) = 0
+            LIMIT 1
+            """,
+            (media_fp, caption_fp),
+        ).fetchone()
+        return bool(row)
+
+
 def record_uploaded_sha(
     db_path: Path,
     *,

@@ -28,6 +28,7 @@ from kakao_import.db import (
 )
 from kakao_import.hashutil import sha256_file
 from kakao_import.logging_util import get_logger
+from kakao_import.upload_state import hold_report, mark_candidates_needs_rebuild_by_similar_group
 from kakao_import.matcher import MatchOutput, PhotoSlot, match_photos_to_messages
 from kakao_import.merge_ops import decide_text_merge, undo_text_merge
 from kakao_import.parser import parse_chat_file
@@ -915,7 +916,13 @@ def cmd_similar_decide(
             return {"ok": False, "error": str(exc)}
         conn.commit()
         out["ok"] = True
-        return out
+    rebuild_count = mark_candidates_needs_rebuild_by_similar_group(
+        settings.db_path,
+        group_id=group_id,
+        reason=f"similar_decide:{decision}",
+    )
+    out["rebuild_marked"] = rebuild_count
+    return out
 
 
 # [변경사유]: Phase 4.1 — 로컬 썸네일 리뷰 UI (decision만)
@@ -958,3 +965,8 @@ def cmd_poster_review(
         port=port,
         open_browser=open_browser,
     )
+
+
+def cmd_hold_report(settings: Settings) -> dict[str, Any]:
+    """보류/재시도/종단 실패 후보 요약."""
+    return hold_report(settings.db_path)

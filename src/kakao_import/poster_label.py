@@ -10,6 +10,7 @@ from kakao_import.logging_util import get_logger
 from kakao_import.poster_const import SOURCE_HUMAN
 from kakao_import.poster_decision import excluded_flag
 from kakao_import.poster_schema import ensure_poster_schema, get_classify_row
+from kakao_import.upload_state import mark_candidates_needs_rebuild_by_sha
 
 log = get_logger(__name__)
 
@@ -79,4 +80,16 @@ def cmd_poster_label(
             )
         conn.commit()
         check = get_classify_row(conn, room_id or "", sha) if room_id else None
-    return {"ok": True, "updated": updated, "sha256": sha, "status": status, "row": check}
+    rebuild_count = mark_candidates_needs_rebuild_by_sha(
+        settings.db_path,
+        sha256=sha,
+        reason=f"poster_label:{status}",
+    )
+    return {
+        "ok": True,
+        "updated": updated,
+        "sha256": sha,
+        "status": status,
+        "row": check,
+        "rebuild_marked": rebuild_count,
+    }

@@ -602,5 +602,15 @@ def poster_label_cmd(ctx: click.Context, sha: str, status: str, room_id: str | N
         raise click.ClickException(str(out.get("error") or "poster-label failed"))
 
 
+@main.command("hold-report")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.pass_context
+def hold_report_cmd(ctx: click.Context, db: Path | None) -> None:
+    """보류/재시도/종단 실패 후보 요약 출력."""
+    settings = _settings_with_db(ctx, db)
+    out = pipe.cmd_hold_report(settings)
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 if __name__ == "__main__":
     main()

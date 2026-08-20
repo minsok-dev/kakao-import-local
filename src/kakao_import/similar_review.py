@@ -25,6 +25,7 @@ from kakao_import.similar_detect import (
     set_similar_group_decision,
 )
 from kakao_import.similar_policy import upload_policy_for_decision
+from kakao_import.upload_state import mark_candidates_needs_rebuild_by_similar_group
 
 log = get_logger(__name__)
 
@@ -696,11 +697,17 @@ def create_handler(settings: Settings, root: Path):
                     conn.commit()
             out["ok"] = True
             out["upload_policy"] = upload_policy_for_decision(out["decision"])
+            out["rebuild_marked"] = mark_candidates_needs_rebuild_by_similar_group(
+                settings.db_path,
+                group_id=group_id,
+                reason=f"similar_review:{out['decision']}",
+            )
             log.info(
-                "similar-review decide group=%s decision=%s policy=%s",
+                "similar-review decide group=%s decision=%s policy=%s rebuild=%s",
                 group_id,
                 out["decision"],
                 out["upload_policy"],
+                out["rebuild_marked"],
             )
             self._json(200, out)
 

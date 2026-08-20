@@ -21,6 +21,7 @@ SCHEMA_SQL_P41 = PROJECT_ROOT / "sql" / "005_phase41_partial_subgroup.sql"
 SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
 # [변경사유]: 장부 fingerprint/ocr_idx/거부 캐시
 SCHEMA_SQL_LEDGER_FP = PROJECT_ROOT / "sql" / "007_ledger_fingerprint.sql"
+SCHEMA_SQL_UPLOAD_STATE = PROJECT_ROOT / "sql" / "008_upload_candidate_state.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -102,6 +103,15 @@ def _apply_ledger_fingerprint_columns(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_upload_candidate_schema(conn: sqlite3.Connection) -> None:
+    """008: upload candidate state tables."""
+    if not SCHEMA_SQL_UPLOAD_STATE.is_file():
+        log.warning("upload state schema missing path=%s", SCHEMA_SQL_UPLOAD_STATE)
+        return
+    conn.executescript(SCHEMA_SQL_UPLOAD_STATE.read_text(encoding="utf-8"))
+    log.info("init_schema sql=%s", SCHEMA_SQL_UPLOAD_STATE.name)
+
+
 def init_schema(db_path: Path, *, reset: bool = False) -> None:
     """스키마 적용 (001 + Phase2 002/003). reset=True면 파일 삭제 후 재생성."""
     if reset and db_path.exists():
@@ -131,6 +141,8 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         # [변경사유]: 장부 fingerprint/ocr_idx/거부 캐시
         log.info("init_schema sql=%s (guarded)", SCHEMA_SQL_LEDGER_FP.name)
         _apply_ledger_fingerprint_columns(conn)
+        # [변경사유]: 증분 업로드/스케줄러 상태 테이블
+        _apply_upload_candidate_schema(conn)
         # [변경사유]: 포스터 분류 테이블 — exact_sha_member 와 분리
         ensure_poster_schema(conn)
         conn.commit()

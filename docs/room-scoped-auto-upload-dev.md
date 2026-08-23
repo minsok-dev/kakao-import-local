@@ -79,6 +79,46 @@ kakao-pc-collect run --room hongdae_bonita --with-upload
 
 ---
 
+## 2.3 남은 개발 순서 (나눠 진행 — 한 PR에 몰지 않음)
+
+<!-- [변경사유]: 2026-08-24 — 운영 게이트·증분 트랙 분리 명시 -->
+
+| 차수 | 범위 | 상태 |
+|------|------|------|
+| **1차 (이번)** | 업로드 요약에 `next`/`ocr_queued` 집계 · similar fail→upload0 테스트 · rebuild 롤백 · **parse `content_sha256` 스킵** | ✅ |
+| **2차** | upload 증분 최종형 (I1: fingerprint/lease/receipt — 변경 후보만 평가·전송) | ✅ (미디어 장부 스킵·run lock·candidate lease) |
+| **3차** | similar SHA fingerprint · `decided_by`/`decided_at` (I2·I3) | ✅ |
+| **4차** | 포스터 sync_log · 주간 retrain · 쿠키 만료 리포트 (I5·I6, S4) | ✅ I5 run-report + 관리자 카톡 알림(opt-in). sync_log·주간 retrain 은 후속 |
+| (선택) | parse 날짜창·match 보존 증분 (I7 나머지 — 부분 파싱+전역 wipe 금지) | 대기 |
+
+## 2.4 관리자 알림 (I5)
+
+<!-- [변경사유]: 2026-08-24 — run-report + 카톡 opt-in 알림 -->
+
+실행이 끝나면:
+
+1. `kakao-pc-collect/data/run-report.json` (+ import `data/run-report.json`) 저장  
+2. `admin_summary_ko` 한 줄~수 줄 요약 포함  
+3. `KAKAO_ADMIN_NOTIFY_SEARCH` 가 있으면 **친구 탭**에서 닉네임 검색 → 1:1 오픈 → **창 제목 검증** → 요약 전송 → **채팅 탭 복귀**  
+   - 방 수집은 항상 **채팅 탭**에서 검색 (`coords.yaml` 의 `chats_tab` / `friends_tab`)  
+   - 채팅 탭 통합검색으로 관리자를 찾으면 오픈채팅·방명이 섞여 오발송 위험이 있음  
+
+```text
+# kakao-pc-collect/.env
+KAKAO_ADMIN_NOTIFY_SEARCH=댄스인포관리자
+```
+
+비우면 전송하지 않음(기본). 오발송 방지를 위해 제목에 검색어가 없으면 전송 중단.
+
+`coords.yaml` (PC마다 calibrate):
+
+```text
+friends_tab: [33, 56]   # F: 로컬 예시 — D: 서버는 [31, 59]
+chats_tab: [30, 118]    # F: 로컬 예시 — D: 서버는 [33, 119]
+```
+
+---
+
 ## 3. 동작 계약
 
 ### 3.1 CLI
@@ -168,6 +208,9 @@ kakao-import upload --no-dry-run --room hongdae_bonita
 4. upload `--room` — 타 방 item 매니페스트 제외  
 5. collect `_call_kakao_import` 명령에 `--room` / `--no-review` 포함  
 6. `run_upload=True` 이고 classify 실패 시 upload 커맨드 미실행 (mock)  
+7. `run_upload=True` 이고 similar-detect 실패 시 upload 미실행 (mock)  
+8. parse: 동일 `content_sha256` 재실행 시 `skipped_unchanged`  
+9. upload 요약: `ocr_queued` / `by_next` 집계  
 
 ---
 

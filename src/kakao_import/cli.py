@@ -369,6 +369,24 @@ def upload_cmd(
     upload_mod.echo_summary_safe(summary)
     if summary.get("result_json"):
         click.echo(f"result_json={summary['result_json']}")
+    # [변경사유]: I5 — upload 단독 실행 시 run-report.json + admin_summary_ko
+    try:
+        from kakao_import.run_report import write_upload_run_report
+
+        report_path = write_upload_run_report(
+            settings.db_path,
+            summary=summary,
+            rooms=list(_rooms_opt(rooms) or []),
+        )
+        click.echo(f"run_report={report_path}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        ko = report.get("admin_summary_ko")
+        if ko:
+            upload_mod.echo_text_safe(str(ko))
+    except Exception as exc:  # noqa: BLE001 — 리포트 실패로 upload 실패 취급하지 않음
+        from kakao_import.logging_util import get_logger
+
+        get_logger(__name__).warning("run-report write fail err=%s", exc)
     if summary.get("error"):
         raise click.ClickException(str(summary["error"]))
 

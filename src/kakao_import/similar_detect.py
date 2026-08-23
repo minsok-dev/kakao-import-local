@@ -19,6 +19,9 @@ log = get_logger(__name__)
 
 SignFn = Callable[[bytes], tuple[str, str, str]]
 
+# [변경사유]: I4 테스트용 — DELETE 직후 실패 주입. 운영에서는 항상 None
+_rebuild_after_delete_hook: Callable[[], None] | None = None
+
 
 def try_import_sign_fn() -> SignFn | None:
     """공용 danceinfo_image_signature 사용 (없으면 None)."""
@@ -46,7 +49,7 @@ def try_import_sign_fn() -> SignFn | None:
 
 
 def ensure_similar_schema(conn: sqlite3.Connection) -> None:
-    """004 테이블 + 005 partial 컬럼 보장."""
+    """004 테이블 + 005 partial 컬럼 + 009 decision audit 보장."""
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='similar_image_group'"
     ).fetchone()
@@ -60,6 +63,8 @@ def ensure_similar_schema(conn: sqlite3.Connection) -> None:
     from kakao_import.db import _apply_phase41_partial_columns
 
     _apply_phase41_partial_columns(conn)
+    # [변경사유]: I3 — decided_by / decided_at
+    _apply_similar_decision_audit_columns(conn)
 
 
 def resolve_photo_path(root: Path, rel_path: str) -> Path | None:
@@ -130,8 +135,48 @@ def upsert_photo_signatures(
 
 
 def _member_fingerprint(photo_ids: list[int] | tuple[int, ...] | set[int]) -> str:
-    """멤버 집합 안정 키 — rebuild 시 decision 복원용."""
+    """멤버 photo_id 집합 키 (레거시 복원 호환)."""
     return ",".join(str(x) for x in sorted({int(p) for p in photo_ids}))
+
+
+def _member_fingerprint_sha(
+    conn: sqlite3.Connection,
+    photo_ids: list[int] | tuple[int, ...] | set[int],
+) -> str:
+    """
+    멤버 media SHA 집합 키.
+    [변경사유]: I2 — photo_id 재할당에도 decision 복원. SHA 없으면 id: 폴백
+    """
+    parts: list[str] = []
+    for pid in sorted({int(p) for p in photo_ids}):
+        row = conn.execute(
+            "SELECT lower(IFNULL(sha256, '')) AS sha FROM photo_file WHERE id = ?",
+            (pid,),
+        ).fetchone()
+        sha = str(row["sha"] if row else "")
+        if len(sha) == 64:
+            parts.append(sha)
+        else:
+            parts.append(f"id:{pid}")
+    return "|".join(parts)
+
+
+def _apply_similar_decision_audit_columns(conn: sqlite3.Connection) -> None:
+    """009 decided_by / decided_at (이미 있으면 skip)."""
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(similar_image_group)").fetchall()
+    }
+    if not cols:
+        return
+    if "decided_by" not in cols:
+        conn.execute("ALTER TABLE similar_image_group ADD COLUMN decided_by TEXT")
+        log.info("schema add column similar_image_group.decided_by")
+    if "decided_at" not in cols:
+        conn.execute("ALTER TABLE similar_image_group ADD COLUMN decided_at TEXT")
+        log.info("schema add column similar_image_group.decided_at")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '10')"
+    )
 
 
 def _snapshot_non_deferred_decisions(
@@ -164,7 +209,9 @@ def _snapshot_non_deferred_decisions(
         pids = [int(m["photo_id"]) for m in mems]
         if len(pids) < 2:
             continue
-        fp = _member_fingerprint(pids)
+        # [변경사유]: I2 — SHA 키 우선, photo_id 키 병기(복원 호환)
+        sha_fp = _member_fingerprint_sha(conn, pids)
+        id_fp = _member_fingerprint(pids)
         decision = str(g["decision"])
         snap: dict[str, Any] = {
             "decision": decision,
@@ -200,7 +247,8 @@ def _snapshot_non_deferred_decisions(
                     }
                 )
             snap["subgroups"] = subgroups
-        out[fp] = snap
+        out[sha_fp] = snap
+        out[id_fp] = snap
     log.info(
         "similar decision snapshot non_deferred=%s workspace=%s",
         len(out),
@@ -225,6 +273,7 @@ def _apply_restored_decision(
         decision=decision,
         representative_photo_id=int(rep) if rep is not None else None,
         subgroups=subgroups if decision == "partial" else None,
+        decided_by="restore",
     )
 
 
@@ -317,9 +366,12 @@ def rebuild_similar_groups(
                 """,
                 (gid,),
             ).fetchall()
-            fp = _member_fingerprint([int(m["photo_id"]) for m in mems])
-            if fp in preserved_all:
-                preserved[fp] = preserved_all[fp]
+            pids = [int(m["photo_id"]) for m in mems]
+            sha_fp = _member_fingerprint_sha(conn, pids)
+            id_fp = _member_fingerprint(pids)
+            for fp in (sha_fp, id_fp):
+                if fp in preserved_all:
+                    preserved[fp] = preserved_all[fp]
     else:
         preserved = preserved_all
 
@@ -343,87 +395,102 @@ def rebuild_similar_groups(
         sorted(want) if want else None,
     )
 
-    if want:
-        if delete_group_ids:
-            gph = ",".join("?" for _ in delete_group_ids)
-            conn.execute(
-                f"DELETE FROM similar_image_member WHERE group_id IN ({gph})",
-                tuple(delete_group_ids),
-            )
-            conn.execute(
-                f"DELETE FROM similar_image_group WHERE id IN ({gph})",
-                tuple(delete_group_ids),
-            )
-    else:
-        conn.execute(
-            "DELETE FROM similar_image_member WHERE group_id IN "
-            "(SELECT id FROM similar_image_group WHERE workspace_key = ?)",
-            (workspace_key,),
-        )
-        conn.execute(
-            "DELETE FROM similar_image_group WHERE workspace_key = ?",
-            (workspace_key,),
-        )
-
-    restored = 0
-    restore_fail = 0
-    start_i = 1
-    if want:
-        import re
-
-        max_key_row = conn.execute(
-            """
-            SELECT group_key FROM similar_image_group
-            WHERE workspace_key = ? AND group_key LIKE 'sg-%'
-            ORDER BY id DESC LIMIT 1
-            """,
-            (workspace_key,),
-        ).fetchone()
-        if max_key_row:
-            m = re.search(r"sg-(\d+)", str(max_key_row["group_key"] or ""))
-            if m:
-                start_i = int(m.group(1)) + 1
-
-    for i, c in enumerate(clusters, start=start_i):
-        gkey = f"sg-{i:04d}"
-        cur = conn.execute(
-            """
-            INSERT INTO similar_image_group (
-              workspace_key, group_key, decision, representative_photo_id,
-              max_distance, member_count, created_at, updated_at
-            ) VALUES (?, ?, 'deferred', ?, ?, ?, datetime('now'), datetime('now'))
-            """,
-            (
-                workspace_key,
-                gkey,
-                c.representative_photo_id,
-                max_distance,
-                len(c.photo_ids),
-            ),
-        )
-        gid = int(cur.lastrowid)
-        for pid in c.photo_ids:
-            conn.execute(
-                """
-                INSERT INTO similar_image_member (group_id, photo_id, is_representative)
-                VALUES (?, ?, ?)
-                """,
-                (gid, pid, 1 if pid == c.representative_photo_id else 0),
-            )
-        fp = _member_fingerprint(c.photo_ids)
-        snap = preserved.get(fp)
-        if snap:
-            try:
-                _apply_restored_decision(conn, group_id=gid, snap=snap)
-                restored += 1
-            except ValueError as exc:
-                log.warning(
-                    "similar decision restore fail group=%s fp=%s err=%s",
-                    gkey,
-                    fp[:48],
-                    str(exc)[:120],
+    # [변경사유]: I4 — DELETE+INSERT 를 한 트랜잭션으로; 중간 실패 시 롤백해 빈 그룹 상태 방지
+    try:
+        if want:
+            if delete_group_ids:
+                gph = ",".join("?" for _ in delete_group_ids)
+                conn.execute(
+                    f"DELETE FROM similar_image_member WHERE group_id IN ({gph})",
+                    tuple(delete_group_ids),
                 )
-                restore_fail += 1
+                conn.execute(
+                    f"DELETE FROM similar_image_group WHERE id IN ({gph})",
+                    tuple(delete_group_ids),
+                )
+        else:
+            conn.execute(
+                "DELETE FROM similar_image_member WHERE group_id IN "
+                "(SELECT id FROM similar_image_group WHERE workspace_key = ?)",
+                (workspace_key,),
+            )
+            conn.execute(
+                "DELETE FROM similar_image_group WHERE workspace_key = ?",
+                (workspace_key,),
+            )
+
+        # [변경사유]: I4 — DELETE 직후 실패 시 롤백 경로 검증용 훅
+        if _rebuild_after_delete_hook is not None:
+            _rebuild_after_delete_hook()
+
+        restored = 0
+        restore_fail = 0
+        start_i = 1
+        if want:
+            import re
+
+            max_key_row = conn.execute(
+                """
+                SELECT group_key FROM similar_image_group
+                WHERE workspace_key = ? AND group_key LIKE 'sg-%'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (workspace_key,),
+            ).fetchone()
+            if max_key_row:
+                m = re.search(r"sg-(\d+)", str(max_key_row["group_key"] or ""))
+                if m:
+                    start_i = int(m.group(1)) + 1
+
+        for i, c in enumerate(clusters, start=start_i):
+            gkey = f"sg-{i:04d}"
+            cur = conn.execute(
+                """
+                INSERT INTO similar_image_group (
+                  workspace_key, group_key, decision, representative_photo_id,
+                  max_distance, member_count, created_at, updated_at
+                ) VALUES (?, ?, 'deferred', ?, ?, ?, datetime('now'), datetime('now'))
+                """,
+                (
+                    workspace_key,
+                    gkey,
+                    c.representative_photo_id,
+                    max_distance,
+                    len(c.photo_ids),
+                ),
+            )
+            gid = int(cur.lastrowid)
+            for pid in c.photo_ids:
+                conn.execute(
+                    """
+                    INSERT INTO similar_image_member (group_id, photo_id, is_representative)
+                    VALUES (?, ?, ?)
+                    """,
+                    (gid, pid, 1 if pid == c.representative_photo_id else 0),
+                )
+            sha_fp = _member_fingerprint_sha(conn, c.photo_ids)
+            id_fp = _member_fingerprint(c.photo_ids)
+            snap = preserved.get(sha_fp) or preserved.get(id_fp)
+            if snap:
+                try:
+                    _apply_restored_decision(conn, group_id=gid, snap=snap)
+                    restored += 1
+                except ValueError as exc:
+                    log.warning(
+                        "similar decision restore fail group=%s fp=%s err=%s",
+                        gkey,
+                        sha_fp[:48],
+                        str(exc)[:120],
+                    )
+                    restore_fail += 1
+    except Exception:
+        log.exception(
+            "similar rebuild aborted — rollback room=%s workspace=%s",
+            sorted(want) if want else None,
+            workspace_key,
+        )
+        conn.rollback()
+        raise
 
     log.info(
         "similar rebuild restore restored=%s failed=%s new_deferred=%s preserved_keys=%s room=%s",
@@ -532,12 +599,14 @@ def set_similar_group_decision(
     decision: str,
     representative_photo_id: int | None = None,
     subgroups: list[dict[str, Any]] | None = None,
+    decided_by: str = "human",
 ) -> dict[str, Any]:
     """
     content decision만 저장. upload 큐·파일 삭제는 하지 않음.
     partial 이면 subgroups 필수:
       [{"photo_ids":[1,2], "representative_photo_id":1}, {"photo_ids":[3]}, ...]
     모든 멤버가 정확히 한 서브그룹에 속해야 함. size≥2 묶음이 1개 이상 권장.
+    [변경사유]: I3 — decided_by / decided_at 기록
     """
     d = (decision or "").strip()
     if d not in VALID_DECISIONS:
@@ -651,11 +720,14 @@ def set_similar_group_decision(
     conn.execute(
         """
         UPDATE similar_image_group
-        SET decision = ?, representative_photo_id = COALESCE(?, representative_photo_id),
+        SET decision = ?,
+            representative_photo_id = COALESCE(?, representative_photo_id),
+            decided_by = ?,
+            decided_at = datetime('now'),
             updated_at = datetime('now')
         WHERE id = ?
         """,
-        (d, rep, group_id),
+        (d, rep, str(decided_by or "human"), group_id),
     )
     return {
         "ok": True,
@@ -664,5 +736,6 @@ def set_similar_group_decision(
         "upload_policy": upload_policy_for_decision(d),
         "representative_photo_id": rep,
         "subgroups": subgroups_out,
+        "decided_by": str(decided_by or "human"),
         "note": "decision only - upload queue unchanged; no auto-merge/delete",
     }

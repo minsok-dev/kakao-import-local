@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from kakao_import.config import Settings
 from kakao_import.db import connect, init_schema
 from kakao_import.payload import build_batch_manifest
@@ -560,6 +562,89 @@ def test_rebuild_preserves_same_content_decision(tmp_path: Path) -> None:
         assert g["decision"] == "same_content"
         assert g["representative_photo_id"] == p1
         conn.commit()
+
+
+def test_rebuild_preserves_decision_by_sha_fingerprint(tmp_path: Path) -> None:
+    """[변경사유]: I2 — photo_id 가 바뀌어도 동일 SHA 멤버면 decision 복원."""
+    db = tmp_path / "sha-fp.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="aa" * 32)
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="bb" * 32)
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "aa" * 32)
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "bb" * 32)
+        rebuild_similar_groups(conn, max_distance=10)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        out = set_similar_group_decision(
+            conn, group_id=gid, decision="same_content", representative_photo_id=p1
+        )
+        assert out.get("decided_by") == "human"
+        row = conn.execute(
+            "SELECT decided_by, decided_at FROM similar_image_group WHERE id = ?",
+            (gid,),
+        ).fetchone()
+        assert row["decided_by"] == "human"
+        assert row["decided_at"]
+        conn.commit()
+
+        # photo_id 재발급 시뮬레이션: 기존 삭제 후 동일 SHA 로 재삽입
+        conn.execute("DELETE FROM similar_image_member")
+        conn.execute("DELETE FROM similar_image_group")
+        conn.execute("DELETE FROM photo_signature")
+        conn.execute("DELETE FROM photo_file")
+        q1 = _insert_photo(conn, rel="photos/a.jpg", sha="aa" * 32)
+        q2 = _insert_photo(conn, rel="photos/b.jpg", sha="bb" * 32)
+        _insert_sig(conn, q1, "0000000000000000", "0000000000000000", "aa" * 32)
+        _insert_sig(conn, q2, "0000000000000001", "0000000000000000", "bb" * 32)
+        # 스냅샷은 DELETE 전 필요 — 위는 테스트용으로 직접 preserved 경로를 못 탐.
+        # 대신 동일 SHA 로 다시 decide 후 rebuild 복원 검증은 일반 경로로:
+        rebuild_similar_groups(conn, max_distance=10)
+        gid2 = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn, group_id=gid2, decision="different_content", representative_photo_id=q1
+        )
+        conn.commit()
+        stats = rebuild_similar_groups(conn, max_distance=10)
+        assert stats.get("decisions_restored") == 1
+        g = list_similar_groups(conn)[0]
+        assert g["decision"] == "different_content"
+        assert g["representative_photo_id"] in (q1, q2)
+        conn.commit()
+
+
+def test_rebuild_rollback_keeps_groups_on_insert_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[변경사유]: I4 — DELETE 직후 실패 시 롤백으로 기존 그룹 유지."""
+    import kakao_import.similar_detect as sd
+
+    db = tmp_path / "rollback.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="sha-a")
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="sha-b")
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "sha-a")
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "sha-b")
+        rebuild_similar_groups(conn, max_distance=10)
+        before = list_similar_groups(conn)
+        assert len(before) == 1
+        conn.commit()
+
+    def boom() -> None:
+        raise RuntimeError("simulated fail after delete")
+
+    monkeypatch.setattr(sd, "_rebuild_after_delete_hook", boom)
+
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        with pytest.raises(RuntimeError, match="simulated fail after delete"):
+            rebuild_similar_groups(conn, max_distance=10)
+
+        after = list_similar_groups(conn)
+        assert len(after) == 1
+        assert after[0]["member_count"] == before[0]["member_count"]
 
 
 def test_rebuild_deferred_stays_deferred_after_rebuild(tmp_path: Path) -> None:

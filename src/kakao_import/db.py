@@ -143,6 +143,10 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         _apply_ledger_fingerprint_columns(conn)
         # [변경사유]: 증분 업로드/스케줄러 상태 테이블
         _apply_upload_candidate_schema(conn)
+        # [변경사유]: I3 — similar decided_by/at (similar 테이블이 있을 때만)
+        from kakao_import.similar_detect import _apply_similar_decision_audit_columns
+
+        _apply_similar_decision_audit_columns(conn)
         # [변경사유]: 포스터 분류 테이블 — exact_sha_member 와 분리
         ensure_poster_schema(conn)
         conn.commit()

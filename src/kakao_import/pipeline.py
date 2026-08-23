@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -250,7 +251,11 @@ def cmd_parse(
     *,
     room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
-    """채팅 TXT 파싱. room_ids 있으면 해당 방만."""
+    """채팅 TXT 파싱. room_ids 있으면 해당 방만.
+
+    [변경사유]: I7 1차 — 동일 rel + content_sha256 이고 메시지가 있으면 재파싱 스킵
+    (부분 파싱+전역 wipe 금지. 날짜 창·match 증분은 후속)
+    """
     root = root or settings.export_root
     assert root is not None
     want = normalize_room_ids(room_ids)
@@ -260,6 +265,7 @@ def cmd_parse(
         rooms = 0
         msgs = 0
         photo_msgs = 0
+        skipped_unchanged = 0
         for room_id, chats_dir, _photos_dir in layouts:
             if not chats_dir.is_dir():
                 continue
@@ -277,9 +283,61 @@ def cmd_parse(
                     selected_rel,
                 )
             for path in selected:
-                result = parse_chat_file(path)
                 st = path.stat()
                 rel = rel_under(root, path)
+                content_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                existing = conn.execute(
+                    """
+                    SELECT id, content_sha256 FROM chat_source
+                    WHERE rel_path = ?
+                    """,
+                    (rel,),
+                ).fetchone()
+                if (
+                    existing
+                    and str(existing["content_sha256"] or "") == content_sha
+                ):
+                    msg_row = conn.execute(
+                        "SELECT COUNT(*) AS n FROM parsed_message WHERE chat_id = ?",
+                        (int(existing["id"]),),
+                    ).fetchone()
+                    msg_n = int(msg_row["n"] if msg_row else 0)
+                    if msg_n > 0:
+                        # [변경사유]: 내용 동일 → replace_messages 생략, batch만 갱신
+                        conn.execute(
+                            """
+                            UPDATE chat_source
+                            SET last_batch_id = ?, file_size = ?, mtime_ns = ?,
+                                updated_at = datetime('now')
+                            WHERE id = ?
+                            """,
+                            (
+                                batch_id,
+                                st.st_size,
+                                getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
+                                int(existing["id"]),
+                            ),
+                        )
+                        photo_row = conn.execute(
+                            """
+                            SELECT COUNT(*) AS n FROM parsed_message
+                            WHERE chat_id = ? AND msg_kind IN ('photo', 'photo_multi')
+                            """,
+                            (int(existing["id"]),),
+                        ).fetchone()
+                        rooms += 1
+                        msgs += msg_n
+                        photo_msgs += int(photo_row["n"] if photo_row else 0)
+                        skipped_unchanged += 1
+                        log.info(
+                            "parse skip unchanged rel=%s room=%s sha=%s messages=%s",
+                            rel,
+                            room_id,
+                            content_sha[:12],
+                            msg_n,
+                        )
+                        continue
+                result = parse_chat_file(path)
                 chat_id = upsert_chat_source(
                     conn,
                     rel_path=rel,
@@ -331,6 +389,7 @@ def cmd_parse(
             "rooms": rooms,
             "messages": msgs,
             "photo_messages": photo_msgs,
+            "skipped_unchanged": skipped_unchanged,
         }
         finish_batch(conn, batch_id, summary)
         conn.commit()

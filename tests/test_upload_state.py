@@ -12,12 +12,14 @@ from kakao_import.pipeline import cmd_hold_report, cmd_similar_decide
 from kakao_import.poster_label import cmd_poster_label
 from kakao_import.similar_detect import ensure_similar_schema, rebuild_similar_groups
 from kakao_import.upload_state import (
+    acquire_run_lock,
     apply_candidate_classification,
     load_incremental_caption_plan,
     mark_candidates_needs_rebuild_by_sha,
     mark_candidate_retry,
     mark_candidate_uploaded,
     record_similar_policy_skips,
+    release_run_lock,
     sync_upload_candidates,
     uploadable_candidate_keys,
 )
@@ -207,6 +209,100 @@ def test_sync_upload_candidates_skips_uploaded_fingerprint(tmp_path: Path) -> No
         ).fetchone()
         assert row["state"] == "uploaded"
         assert row["state_reason"] == "ledger_match"
+
+
+def test_sync_skips_when_caption_changes_but_media_on_ledger(tmp_path: Path) -> None:
+    """[변경사유]: I1 — 캡션 지문만 달라도 동일 미디어면 HTTP 재전송 안 함."""
+    root = tmp_path / "raw"
+    root.mkdir()
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    media_fp = "1" * 64
+    record_uploaded_sha(
+        settings.db_path,
+        source_sha256=media_fp,
+        request_idx=10,
+        next_val="sns_appended",
+        media_fingerprint=media_fp,
+        caption_fingerprint="2" * 64,
+    )
+    # 1차 sync — uploaded
+    sync_upload_candidates(
+        settings.db_path,
+        requests=[
+            {
+                "candidate_key": f"media:{media_fp}",
+                "media_fingerprint": media_fp,
+                "caption_fingerprint": "2" * 64,
+                "file_rel": "photos/x.jpg",
+                "item": {
+                    "sha256": media_fp,
+                    "matched_messages": [{"text": "old"}],
+                    "sub_images": [],
+                },
+            }
+        ],
+    )
+    # 2차 — 캡션만 변경
+    out = sync_upload_candidates(
+        settings.db_path,
+        requests=[
+            {
+                "candidate_key": f"media:{media_fp}",
+                "media_fingerprint": media_fp,
+                "caption_fingerprint": "3" * 64,
+                "file_rel": "photos/x.jpg",
+                "item": {
+                    "sha256": media_fp,
+                    "matched_messages": [{"text": "new caption"}],
+                    "sub_images": [],
+                },
+            }
+        ],
+    )
+    assert out["actionable_count"] == 0
+    assert out["skipped_uploaded_count"] == 1
+    with connect(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT state, state_reason FROM upload_candidate WHERE candidate_key = ?",
+            (f"media:{media_fp}",),
+        ).fetchone()
+    assert row["state"] == "uploaded"
+    assert row["state_reason"] in ("ledger_media_match", "keep_state:uploaded", "ledger_match")
+
+
+def test_caption_plan_skips_ledger_source_sha(tmp_path: Path) -> None:
+    """장부 source_sha256 은 skip_shas 에 들어가 caption 재계산을 생략한다."""
+    root = tmp_path / "raw"
+    root.mkdir()
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    sha = "9" * 64
+    record_uploaded_sha(
+        settings.db_path,
+        source_sha256=sha,
+        request_idx=1,
+        next_val="ocr_queued",
+        media_fingerprint=sha,
+        caption_fingerprint="8" * 64,
+    )
+    plan = load_incremental_caption_plan(settings.db_path)
+    assert sha in plan["skip_shas"]
+
+
+def test_acquire_run_lock_blocks_second_owner(tmp_path: Path) -> None:
+    """[변경사유]: I1 — upload_run_lock 중복 실행 차단."""
+    db = tmp_path / "lock.db"
+    init_schema(db)
+    first = acquire_run_lock(db, lock_name="upload", owner="owner-a", ttl_sec=600)
+    assert first["acquired"] is True
+    second = acquire_run_lock(db, lock_name="upload", owner="owner-b", ttl_sec=600)
+    assert second["acquired"] is False
+    assert second.get("blocked_by") == "owner-a"
+    release_run_lock(db, lock_name="upload", owner="owner-a")
+    third = acquire_run_lock(db, lock_name="upload", owner="owner-b", ttl_sec=600)
+    assert third["acquired"] is True
+    release_run_lock(db, lock_name="upload", owner="owner-b")
 
 
 def test_apply_candidate_classification_marks_missing_and_poster_states(tmp_path: Path) -> None:

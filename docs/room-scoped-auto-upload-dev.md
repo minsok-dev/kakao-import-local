@@ -88,7 +88,7 @@ kakao-pc-collect run --room hongdae_bonita --with-upload
 | **1차 (이번)** | 업로드 요약에 `next`/`ocr_queued` 집계 · similar fail→upload0 테스트 · rebuild 롤백 · **parse `content_sha256` 스킵** | ✅ |
 | **2차** | upload 증분 최종형 (I1: fingerprint/lease/receipt — 변경 후보만 평가·전송) | ✅ (미디어 장부 스킵·run lock·candidate lease) |
 | **3차** | similar SHA fingerprint · `decided_by`/`decided_at` (I2·I3) | ✅ |
-| **4차** | 포스터 sync_log · 주간 retrain · 쿠키 만료 리포트 (I5·I6, S4) | ✅ I5 run-report + 관리자 카톡 알림(opt-in). sync_log·주간 retrain 은 후속 |
+| **4차** | 포스터 sync_log · 주간 retrain · 쿠키 만료 리포트 (I5·I6, S4) | ✅ I5 run-report·관리자 알림 · I6 `poster_sync_log` · B7 `scripts/weekly_poster_retrain.ps1` |
 | (선택) | parse 날짜창·match 보존 증분 (I7 나머지 — 부분 파싱+전역 wipe 금지) | 대기 |
 
 ## 2.4 관리자 알림 (I5)

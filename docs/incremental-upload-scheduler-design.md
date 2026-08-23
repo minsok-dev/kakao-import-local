@@ -620,6 +620,10 @@
  | 아이디어 | 효과 | 주의 |
  |----------|------|------|
  | chat `content_sha256` 동일 → parse·replace 스킵 | 파싱 CPU/IO 대폭↓ | export가 매일 “전체 덤프로 덮어쓰기”면 SHA가 바뀌어 스킵 안 됨 |
+
+<!-- [변경사유]: 2026-08-24 — I7 1차(SHA 스킵) 구현. 날짜창·match 증분은 후속 -->
+**구현 상태:** `cmd_parse` 가 동일 `rel_path` + `content_sha256` 이고 메시지가 있으면 `replace_messages` 를 스킵한다 (`skipped_unchanged`).
+날짜 창 파싱·match 행 보존은 **아직 미구현** (부분 파싱+전역 wipe 금지).
  | mtime/size만 보고 스킵 | 구현 단순 | 내용 변경 누락 위험 → SHA가 더 안전 |
  | 신규 photo만 match | match 시간↓ | 캡션·같은 분 그룹이 과거 메시지에 의존 → **방 단위 재매칭**이 더 안전할 수 있음 |
  | scan: mtime 불변 파일 skip | walk는 남음, upsert↓ | 상대적 이득 작을 수 있음 |

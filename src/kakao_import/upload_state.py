@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from kakao_import.db import connect
-from kakao_import.ledger import has_uploaded_fingerprint
+from kakao_import.ledger import (
+    has_uploaded_fingerprint,
+    is_uploaded_media_fingerprint,
+)
 from kakao_import.logging_util import get_logger
 
 log = get_logger(__name__)
@@ -243,14 +246,14 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
                 caption_cache[sha] = str(cached)
         out["skip_shas"] = skip_shas
         out["caption_cache"] = caption_cache
-        # [변경사유]: upload_candidate 이전 장부만 있는 SHA도 caption 재계산 생략 (bootstrap)
+        # [변경사유]: I1 — 장부 source_sha256 기준 skip (bundle media_fp 와 exact sha 불일치 방지)
         try:
             ledger_rows = conn.execute(
                 """
-                SELECT
-                  lower(IFNULL(NULLIF(media_fingerprint, ''), source_sha256)) AS sha
+                SELECT lower(source_sha256) AS sha
                 FROM uploaded_sha_ledger
                 WHERE IFNULL(rejected, 0) = 0
+                  AND length(IFNULL(source_sha256, '')) = 64
                 """
             ).fetchall()
             for row in ledger_rows:
@@ -414,6 +417,8 @@ def sync_upload_candidates(
                 media_fingerprint=media_fp,
                 caption_fingerprint=caption_fp or None,
             )
+            # [변경사유]: I1 — 미디어만 장부에 있어도 full HTTP 재전송 금지
+            media_uploaded = is_uploaded_media_fingerprint(db_path, media_fp)
             state = "new"
             state_reason = "new_candidate"
             if row:
@@ -426,15 +431,28 @@ def sync_upload_candidates(
                 elif not needs_rebuild and same_eval and current_state == "retry_wait":
                     state = "retry_wait"
                     state_reason = "keep_state:retry_wait"
-                elif ledger_uploaded:
+                elif not needs_rebuild and (
+                    ledger_uploaded
+                    or media_uploaded
+                    or current_state == "uploaded"
+                ):
+                    # [변경사유]: 캡션 지문이 달라도 동일 미디어면 uploaded 유지 (재업로드 HTTP 폭주 방지)
                     state = "uploaded"
-                    state_reason = "ledger_match"
+                    state_reason = (
+                        "ledger_match"
+                        if ledger_uploaded
+                        else (
+                            "ledger_media_match"
+                            if media_uploaded
+                            else "keep_state:uploaded"
+                        )
+                    )
                 else:
                     state = "new"
                     state_reason = "candidate_changed"
-            elif ledger_uploaded:
+            elif ledger_uploaded or media_uploaded:
                 state = "uploaded"
-                state_reason = "ledger_match"
+                state_reason = "ledger_match" if ledger_uploaded else "ledger_media_match"
 
             conn.execute(
                 """
@@ -795,3 +813,169 @@ def uploadable_candidate_keys(
                     continue
             out.add(key)
     return out
+
+
+def acquire_run_lock(
+    db_path: Path,
+    *,
+    lock_name: str = "upload",
+    owner: str,
+    ttl_sec: int = 7200,
+) -> dict[str, Any]:
+    """
+    프로세스 실행 lock.
+    [변경사유]: I1 — 스케줄러 중복 upload 인스턴스 방지 (upload_run_lock)
+    """
+    out: dict[str, Any] = {
+        "acquired": False,
+        "owner": owner,
+        "lock_name": lock_name,
+    }
+    with connect(db_path) as conn:
+        if not _candidate_tables_exist(conn):
+            out["acquired"] = True
+            out["skipped_no_table"] = True
+            return out
+        row = conn.execute(
+            """
+            SELECT owner, lease_expires_at
+            FROM upload_run_lock
+            WHERE lock_name = ?
+            """,
+            (lock_name,),
+        ).fetchone()
+        if row and row["lease_expires_at"]:
+            alive = conn.execute(
+                "SELECT 1 WHERE ? > datetime('now')",
+                (str(row["lease_expires_at"]),),
+            ).fetchone()
+            if alive and str(row["owner"] or "") != owner:
+                out["blocked_by"] = str(row["owner"] or "")
+                out["expires_at"] = str(row["lease_expires_at"])
+                log.warning(
+                    "upload-run-lock busy name=%s owner=%s expires=%s",
+                    lock_name,
+                    out["blocked_by"],
+                    out["expires_at"],
+                )
+                return out
+        conn.execute(
+            """
+            INSERT INTO upload_run_lock (lock_name, owner, acquired_at, lease_expires_at)
+            VALUES (?, ?, datetime('now'), datetime('now', '+' || ? || ' seconds'))
+            ON CONFLICT(lock_name) DO UPDATE SET
+              owner = excluded.owner,
+              acquired_at = datetime('now'),
+              lease_expires_at = excluded.lease_expires_at
+            """,
+            (lock_name, owner, int(ttl_sec)),
+        )
+        conn.commit()
+        out["acquired"] = True
+        log.info(
+            "upload-run-lock acquired name=%s owner=%s ttl=%s",
+            lock_name,
+            owner,
+            ttl_sec,
+        )
+    return out
+
+
+def release_run_lock(
+    db_path: Path,
+    *,
+    lock_name: str = "upload",
+    owner: str,
+) -> None:
+    """실행 lock 해제 (본인 owner 만)."""
+    with connect(db_path) as conn:
+        if not _candidate_tables_exist(conn):
+            return
+        conn.execute(
+            """
+            DELETE FROM upload_run_lock
+            WHERE lock_name = ? AND owner = ?
+            """,
+            (lock_name, owner),
+        )
+        conn.commit()
+        log.info("upload-run-lock released name=%s owner=%s", lock_name, owner)
+
+
+def acquire_candidate_lease(
+    db_path: Path,
+    *,
+    candidate_key: str,
+    owner: str,
+    ttl_sec: int = 900,
+) -> bool:
+    """
+    후보 lease.
+    [변경사유]: I1 — 동일 candidate 동시 전송 방지
+    """
+    key = str(candidate_key or "").strip()
+    if not key:
+        return True
+    with connect(db_path) as conn:
+        if not _candidate_tables_exist(conn):
+            return True
+        row = conn.execute(
+            """
+            SELECT lease_owner, lease_expires_at
+            FROM upload_candidate
+            WHERE candidate_key = ?
+            """,
+            (key,),
+        ).fetchone()
+        if not row:
+            return True
+        if row["lease_expires_at"] and str(row["lease_owner"] or "") != owner:
+            alive = conn.execute(
+                "SELECT 1 WHERE ? > datetime('now')",
+                (str(row["lease_expires_at"]),),
+            ).fetchone()
+            if alive:
+                log.info(
+                    "upload-candidate-lease busy key=%s owner=%s",
+                    key[:48],
+                    row["lease_owner"],
+                )
+                return False
+        conn.execute(
+            """
+            UPDATE upload_candidate
+            SET lease_owner = ?,
+                lease_expires_at = datetime('now', '+' || ? || ' seconds'),
+                updated_at = datetime('now')
+            WHERE candidate_key = ?
+            """,
+            (owner, int(ttl_sec), key),
+        )
+        conn.commit()
+        return True
+
+
+def release_candidate_lease(
+    db_path: Path,
+    *,
+    candidate_key: str,
+    owner: str,
+) -> None:
+    """후보 lease 해제."""
+    key = str(candidate_key or "").strip()
+    if not key:
+        return
+    with connect(db_path) as conn:
+        if not _candidate_tables_exist(conn):
+            return
+        conn.execute(
+            """
+            UPDATE upload_candidate
+            SET lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = datetime('now')
+            WHERE candidate_key = ? AND IFNULL(lease_owner, '') = ?
+            """,
+            (key, owner),
+        )
+        conn.commit()

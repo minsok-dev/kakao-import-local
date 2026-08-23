@@ -12,6 +12,8 @@ from kakao_import.logging_util import get_logger
 
 log = get_logger(__name__)
 SCHEMA_SQL_POSTER = PROJECT_ROOT / "sql" / "007_poster_classify.sql"
+# [변경사유]: I6/B2 — dataset sync 이력
+SCHEMA_SQL_POSTER_SYNC = PROJECT_ROOT / "sql" / "010_poster_sync_log.sql"
 
 
 def poster_tables_exist(conn: sqlite3.Connection) -> bool:
@@ -23,13 +25,17 @@ def poster_tables_exist(conn: sqlite3.Connection) -> bool:
 
 
 def ensure_poster_schema(conn: sqlite3.Connection) -> None:
-    """007 적용 (이미 있으면 IF NOT EXISTS)."""
+    """007 적용 (이미 있으면 IF NOT EXISTS) + 010 sync_log."""
     if not SCHEMA_SQL_POSTER.is_file():
         log.warning("poster schema missing path=%s", SCHEMA_SQL_POSTER)
         return
     sql = SCHEMA_SQL_POSTER.read_text(encoding="utf-8")
     conn.executescript(sql)
     log.info("init_schema sql=%s", SCHEMA_SQL_POSTER.name)
+    # [변경사유]: B2 — sync 이력 테이블 (IF NOT EXISTS)
+    if SCHEMA_SQL_POSTER_SYNC.is_file():
+        conn.executescript(SCHEMA_SQL_POSTER_SYNC.read_text(encoding="utf-8"))
+        log.info("init_schema sql=%s", SCHEMA_SQL_POSTER_SYNC.name)
 
 
 def excluded_poster_shas(conn: sqlite3.Connection) -> set[str]:

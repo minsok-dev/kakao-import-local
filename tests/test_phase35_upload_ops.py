@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kakao_import.config import Settings
 from kakao_import.upload import (
+    aggregate_upload_server_outcomes,
     build_upload_summary,
     classify_upload_requests,
     cmd_upload,
@@ -111,6 +112,32 @@ def test_summary_and_utf8_result(tmp_path: Path) -> None:
     assert "EMPTY_CONTEXT" in raw
     assert "\U0001fadf" in raw
     assert "SIMILAR_DEFERRED_BLOCKED" in raw
+
+
+def test_aggregate_upload_server_outcomes_counts_next() -> None:
+    """[변경사유]: HTTP OK 와 next=ocr_queued(신규 OCR) 분리 집계."""
+    results = [
+        {
+            "ok": True,
+            "response": {"data": {"next": "ocr_queued", "ocr_idx": 100}},
+        },
+        {
+            "ok": True,
+            "response": {"data": {"next": "sns_appended", "ocr_idx": 99}},
+        },
+        {
+            "ok": True,
+            "response": {"data": {"next": "sns_appended", "ocr_idx": 98}},
+        },
+        {"ok": False, "error": "boom"},
+    ]
+    out = aggregate_upload_server_outcomes(results)
+    assert out["http_ok"] == 3
+    assert out["http_fail"] == 1
+    assert out["ocr_queued"] == 1
+    assert out["ocr_idx_present"] == 3
+    assert out["by_next"]["ocr_queued"] == 1
+    assert out["by_next"]["sns_appended"] == 2
 
 
 def test_prune_missing(tmp_path: Path) -> None:

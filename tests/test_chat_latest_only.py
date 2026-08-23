@@ -74,3 +74,56 @@ def test_cmd_parse_keeps_only_latest_chat_source(tmp_path: Path) -> None:
         "gangnam_latin/chats/KakaoTalk_20260818_013327453_group.txt"
     ]
     assert [str(r["body_raw"]) for r in msgs] == ["최신 대화"]
+
+
+def test_cmd_parse_skips_unchanged_content_sha(tmp_path: Path) -> None:
+    """[변경사유]: I7 — content_sha256 동일 시 재파싱·replace 스킵."""
+    root = tmp_path / "raw"
+    chats = root / "gangnam_latin" / "chats"
+    photos = root / "gangnam_latin" / "photos"
+    chats.mkdir(parents=True)
+    photos.mkdir(parents=True)
+    txt = chats / "KakaoTalk_20260818_013327453_group.txt"
+    txt.write_text(_chat_text("강남 라틴클럽", "동일 대화"), encoding="utf-8")
+
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+
+    first = cmd_parse(settings, root)
+    assert first["skipped_unchanged"] == 0
+    assert first["messages"] == 1
+
+    second = cmd_parse(settings, root)
+    assert second["skipped_unchanged"] == 1
+    assert second["messages"] == 1
+    assert second["rooms"] == 1
+
+    with connect(settings.db_path) as conn:
+        msgs = conn.execute(
+            "SELECT body_raw FROM parsed_message ORDER BY id"
+        ).fetchall()
+    assert [str(r["body_raw"]) for r in msgs] == ["동일 대화"]
+
+
+def test_cmd_parse_reparses_when_content_changes(tmp_path: Path) -> None:
+    """내용이 바뀌면 스킵하지 않고 메시지를 교체한다."""
+    root = tmp_path / "raw"
+    chats = root / "gangnam_latin" / "chats"
+    (root / "gangnam_latin" / "photos").mkdir(parents=True)
+    chats.mkdir(parents=True)
+    txt = chats / "KakaoTalk_20260818_013327453_group.txt"
+    txt.write_text(_chat_text("강남 라틴클럽", "첫번째"), encoding="utf-8")
+
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    cmd_parse(settings, root)
+
+    txt.write_text(_chat_text("강남 라틴클럽", "두번째"), encoding="utf-8")
+    out = cmd_parse(settings, root)
+    assert out["skipped_unchanged"] == 0
+
+    with connect(settings.db_path) as conn:
+        msgs = conn.execute(
+            "SELECT body_raw FROM parsed_message ORDER BY id"
+        ).fetchall()
+    assert [str(r["body_raw"]) for r in msgs] == ["두번째"]

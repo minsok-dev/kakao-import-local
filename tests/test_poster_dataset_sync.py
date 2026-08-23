@@ -70,11 +70,21 @@ def test_poster_dataset_sync_copies_human_labels(tmp_path: Path) -> None:
     assert out["ok"] is True
     assert out["copied"] == 1
     assert out["missing"] == 0
+    assert out.get("sync_log_rows", 0) >= 1
     files = list(poster_dir.iterdir())
     assert len(files) == 1
     assert sha[:12] in files[0].name
     # 원본 유지
     assert img.is_file()
+    # [변경사유]: B2 — sync_log 에 copied 기록
+    with connect(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT result, status, dest_name FROM poster_sync_log WHERE sha256 = ?",
+            (sha,),
+        ).fetchone()
+        assert row is not None
+        assert row["result"] == "copied"
+        assert row["status"] == "poster"
 
 
 def test_poster_dataset_sync_skips_uncertain(tmp_path: Path) -> None:

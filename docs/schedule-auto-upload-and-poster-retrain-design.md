@@ -5,7 +5,7 @@
 | 항목 | 내용 |
 |------|------|
 | 기준일 | 2026-08-22 |
-| 상태 | **P0 구현 완료** (A1–A3·A5–A6, B1·B3–B6). P1 선택(A4 DDL·B2 sync_log·주간 retrain 스케줄)만 미착수 |
+| 상태 | **P0·P1 구현 완료** (A1–A3·A5–A6, B1–B6, B2 sync_log, B7 주간 스크립트). I7 parse 증분 나머지·운영 Task 등록은 선택 |
 | 레포 | `kakao-import-local` (주) · `kakao-pc-collect` (체인 배선) |
 | 관련 | [incremental-upload-scheduler-design.md](./incremental-upload-scheduler-design.md) (§20~22 리뷰·classify/similar/parse·시간) · [room-scoped-auto-upload-dev.md](./room-scoped-auto-upload-dev.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [poster-classifier-dev.md](./poster-classifier-dev.md) |
 | 운영 절차 | 본 문서 **§11** (로컬 테스트 · 스케줄 · similar 수동) |
@@ -355,12 +355,12 @@ T3는 `false_exclude` 게이트 실패 시 activate 금지·리포트만.
 | ID | 항목 | 우선 |
 |----|------|------|
 | B1 | `poster_dataset_sync.py` + CLI | P0 | ✅ |
-| B2 | (선택) `poster_sync_log` 또는 classify에 `dataset_synced_at` | P1 | 미착수 |
+| B2 | (선택) `poster_sync_log` 또는 classify에 `dataset_synced_at` | P1 | ✅ `sql/010_poster_sync_log.sql` + sync 시 INSERT |
 | B3 | `poster-retrain-from-review` = sync + train | P0 | ✅ |
 | B4 | `--activate` 옵션 + 게이트 | P1 | ✅ (`--activate` / `--activate-force`) |
 | B5 | 테스트: human label → dataset 파일 존재 | P0 | ✅ |
 | B6 | 문서: poster-classifier-dev C3 자동화 절 | P0 | 설계 §3·§10 |
-| B7 | 주간 Task Scheduler 예시 | P2 | 운영 선택 |
+| B7 | 주간 Task Scheduler 예시 | P2 | ✅ `scripts/weekly_poster_retrain.ps1` |
 
 ### 3.8 작업 B — 비목표 (1차)
 
@@ -435,11 +435,22 @@ kakao-import poster-retrain-from-review
 2. retrain-from-review  
 3. 문서 §3·§10  
 
-### Phase S4 — 운영 자동화 (P1~P2) — 선택
+### Phase S4 — 운영 자동화 (P1~P2) ✅
 
-1. decided_by DDL  
-2. 주간 retrain 스케줄  
+1. decided_by DDL (`sql/009`)  
+2. 주간 retrain 스케줄 예시 (`scripts/weekly_poster_retrain.ps1`)  
 3. `--activate`는 CLI에 이미 있음 (게이트 운영 정책만)  
+4. `poster_sync_log` (`sql/010`)  
+
+등록 예 (관리자 PowerShell, 경로·시각은 PC에 맞게):
+
+```powershell
+schtasks /Create /TN "KakaoPosterWeeklyRetrain" /SC WEEKLY /D SUN /ST 10:00 ^
+  /TR "powershell -NoProfile -ExecutionPolicy Bypass -File D:\site_kdance\kakao-import-local\scripts\weekly_poster_retrain.ps1" ^
+  /RL LIMITED
+```
+
+야간 collect 체인과 시각이 겹치지 않게 잡을 것. `--activate` 는 기본 끔.  
 
 ---
 

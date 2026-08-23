@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -27,11 +28,15 @@ from kakao_import.payload import (
     is_attachment_marker_text,
     write_manifest,
 )
-from kakao_import.upload_state import sync_upload_candidates
 from kakao_import.upload_state import (
+    acquire_candidate_lease,
+    acquire_run_lock,
     apply_candidate_classification,
     mark_candidate_retry,
     mark_candidate_uploaded,
+    release_candidate_lease,
+    release_run_lock,
+    sync_upload_candidates,
     uploadable_candidate_keys,
 )
 
@@ -222,6 +227,38 @@ def build_upload_summary(
     }
 
 
+def aggregate_upload_server_outcomes(
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    HTTP 성공 건의 next / ocr_idx 집계.
+    [변경사유]: 콘솔 READY·OK 와 서버 '새 OCR' 혼동 방지 — next·ocr 신호 분리 표기
+    """
+    by_next: dict[str, int] = {}
+    ocr_idx_n = 0
+    ocr_queued_n = 0
+    for r in results:
+        if not r.get("ok"):
+            continue
+        fields = response_ledger_fields(
+            r.get("response") if isinstance(r.get("response"), dict) else None
+        )
+        next_val = str(fields.get("next_val") or "").strip() or "(empty)"
+        by_next[next_val] = by_next.get(next_val, 0) + 1
+        if fields.get("ocr_idx") is not None:
+            ocr_idx_n += 1
+        if next_val == "ocr_queued":
+            ocr_queued_n += 1
+    return {
+        "by_next": by_next,
+        "ocr_idx_present": ocr_idx_n,
+        # [변경사유]: 서버가 신규 OCR 큐에 넣은 건수(관리자 '새 OCR'에 가장 가깝다)
+        "ocr_queued": ocr_queued_n,
+        "http_ok": sum(1 for r in results if r.get("ok")),
+        "http_fail": sum(1 for r in results if not r.get("ok")),
+    }
+
+
 def write_upload_result_json(path: Path, data: dict[str, Any]) -> None:
     """상세 결과 UTF-8 저장 (Windows cp949 콘솔 우회)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,8 +318,21 @@ def echo_summary_safe(summary: dict[str, Any]) -> None:
         f"유사(대표만) 스킵: {summary.get('SIMILAR_SKIPPED_REPRESENTATIVE', 0)}",
         f"파일 없음: {summary.get('FILE_MISSING', 0)}",
         f"dry_run={summary.get('dry_run')} blocked={summary.get('blocked')}",
-        "----------------------",
     ]
+    # [변경사유]: HTTP OK≠새 OCR — next/ocr_queued 를 요약에 명시
+    ocr_queued = summary.get("ocr_queued")
+    by_next = summary.get("by_next")
+    if ocr_queued is not None or isinstance(by_next, dict):
+        ko_lines.append(
+            f"서버 next=ocr_queued(신규 OCR 추정): {int(ocr_queued or 0)}"
+        )
+        if isinstance(by_next, dict) and by_next:
+            parts = [f"{k}={v}" for k, v in sorted(by_next.items())]
+            ko_lines.append(f"서버 next 분포: {', '.join(parts)}")
+        ko_lines.append(
+            f"응답 ocr_idx 포함: {int(summary.get('ocr_idx_present') or 0)}"
+        )
+    ko_lines.append("----------------------")
     echo_text_safe("\n".join(ko_lines))
 
 
@@ -588,115 +638,126 @@ def cmd_upload(
             "실전송에는 --endpoint 또는 KAKAO_IMPORT_ENDPOINT 필요"
         )
 
-    results: list[dict[str, Any]] = []
-
-    # file_missing — 업로드 시도 없이 기록
-    for miss in classified["file_missing"]:
-        results.append(
-            {
-                "ok": False,
-                "error": "file_missing",
-                "rel": miss.get("rel"),
-            }
-        )
-
-    # [변경사유]: READY + EMPTY(이미지만) 모두 전송 — file_missing만 제외
-    upload_queue: list[dict[str, Any]] = [
-        entry
-        for entry in classified["ready"]
-        if (
-            not str(entry.get("candidate_key") or "").strip()
-            or str(entry.get("candidate_key") or "") in allowed_keys
-        )
-    ]
-    for ea in classified["empty_adjacent"]:
-        rel = str(ea.get("rel") or "")
-        req = next(
-            (
-                r
-                for r in actionable_requests
-                if str(r.get("file_rel") or "").replace("\\", "/") == rel
-                and (
-                    not str(r.get("candidate_key") or "").strip()
-                    or str(r.get("candidate_key") or "") in allowed_keys
-                )
-            ),
-            None,
-        )
-        if req is None:
-            continue
-        fp = Path(str(ea.get("file_path") or ""))
-        if not fp.is_file():
-            results.append({"ok": False, "error": "file_missing", "rel": rel})
-            continue
-        upload_queue.append(
-            {
-                **ea,
-                "payload": req,
-                "file_path": str(fp),
-                "sub_file_paths": list(ea.get("sub_file_paths") or []),
-            }
-        )
-
-    log.info(
-        "upload pace sleep_sec=%s ocr_extra_sec=%s queue=%s",
-        pace_sleep,
-        pace_ocr_extra,
-        len(upload_queue),
+    # [변경사유]: I1 — 실전송만 process lock (dry-run 은 잠금 안 함)
+    run_owner = f"upload:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    lock_info = acquire_run_lock(
+        settings.db_path, lock_name="upload", owner=run_owner, ttl_sec=7200
     )
-    for idx, entry in enumerate(upload_queue):
-        req_payload = entry["payload"]
-        candidate_key = str(req_payload.get("candidate_key") or "").strip()
-        file_path = Path(entry["file_path"])
-        sub_paths = [Path(p) for p in (entry.get("sub_file_paths") or [])]
-        rel = str(entry.get("rel") or "")
-        try:
-            sz = file_path.stat().st_size
-        except OSError:
-            sz = -1
-        if exceeds_ingress_limit(sz):
-            log.warning(
-                "skip upload oversized rel=%s bytes=%s error=FILE_EXCEEDS_INGRESS_LIMIT",
-                rel,
-                sz,
-            )
+    if not lock_info.get("acquired"):
+        summary = build_upload_summary(
+            dry_run=False,
+            classified=classified,
+            blocked=True,
+            allow_empty_caption=not strict_adjacent,
+        )
+        summary["error"] = "UPLOAD_RUN_LOCK_BUSY"
+        summary["lock"] = lock_info
+        write_upload_result_json(
+            result_path,
+            {"summary": summary, "error": "UPLOAD_RUN_LOCK_BUSY", "lock": lock_info},
+        )
+        return {
+            **summary,
+            "item_count": 0,
+            "ok": 0,
+            "fail": 0,
+            "result_json": str(result_path),
+            "error": "UPLOAD_RUN_LOCK_BUSY",
+        }
+
+    results: list[dict[str, Any]] = []
+    try:
+        # file_missing — 업로드 시도 없이 기록
+        for miss in classified["file_missing"]:
             results.append(
                 {
                     "ok": False,
-                    "error": "FILE_EXCEEDS_INGRESS_LIMIT",
-                    "rel": rel,
-                    "bytes": sz,
+                    "error": "file_missing",
+                    "rel": miss.get("rel"),
                 }
             )
-            if candidate_key:
-                mark_candidate_retry(
-                    settings.db_path,
-                    candidate_key=candidate_key,
-                    error_code="FILE_EXCEEDS_INGRESS_LIMIT",
-                    error_message=f"main file too large: {sz}",
-                    terminal=True,
+
+        # [변경사유]: READY + EMPTY(이미지만) 모두 전송 — file_missing만 제외
+        upload_queue: list[dict[str, Any]] = [
+            entry
+            for entry in classified["ready"]
+            if (
+                not str(entry.get("candidate_key") or "").strip()
+                or str(entry.get("candidate_key") or "") in allowed_keys
+            )
+        ]
+        for ea in classified["empty_adjacent"]:
+            rel = str(ea.get("rel") or "")
+            req = next(
+                (
+                    r
+                    for r in actionable_requests
+                    if str(r.get("file_rel") or "").replace("\\", "/") == rel
+                    and (
+                        not str(r.get("candidate_key") or "").strip()
+                        or str(r.get("candidate_key") or "") in allowed_keys
+                    )
+                ),
+                None,
+            )
+            if req is None:
+                continue
+            fp = Path(str(ea.get("file_path") or ""))
+            if not fp.is_file():
+                results.append({"ok": False, "error": "file_missing", "rel": rel})
+                continue
+            upload_queue.append(
+                {
+                    **ea,
+                    "payload": req,
+                    "file_path": str(fp),
+                    "sub_file_paths": list(ea.get("sub_file_paths") or []),
+                }
+            )
+
+        log.info(
+            "upload pace sleep_sec=%s ocr_extra_sec=%s queue=%s",
+            pace_sleep,
+            pace_ocr_extra,
+            len(upload_queue),
+        )
+        for idx, entry in enumerate(upload_queue):
+            req_payload = entry["payload"]
+            candidate_key = str(req_payload.get("candidate_key") or "").strip()
+            # [변경사유]: I1 — candidate lease (다른 프로세스 점유 시 스킵)
+            if candidate_key and not acquire_candidate_lease(
+                settings.db_path,
+                candidate_key=candidate_key,
+                owner=run_owner,
+            ):
+                results.append(
+                    {
+                        "ok": False,
+                        "error": "CANDIDATE_LEASE_BUSY",
+                        "rel": entry.get("rel"),
+                        "candidate_key": candidate_key,
+                    }
                 )
-            continue
-        # [변경사유]: Phase 4.2+ — sub 도 파일별 ingress 검사
-        oversized_sub = False
-        for sp in sub_paths:
+                continue
+            file_path = Path(entry["file_path"])
+            sub_paths = [Path(p) for p in (entry.get("sub_file_paths") or [])]
+            rel = str(entry.get("rel") or "")
             try:
-                ssz = sp.stat().st_size
+                sz = file_path.stat().st_size
             except OSError:
-                ssz = -1
-            if exceeds_ingress_limit(ssz):
+                sz = -1
+            if exceeds_ingress_limit(sz):
                 log.warning(
-                    "skip upload oversized sub rel=%s bytes=%s",
-                    sp.name,
-                    ssz,
+                    "skip upload oversized rel=%s bytes=%s error=FILE_EXCEEDS_INGRESS_LIMIT",
+                    rel,
+                    sz,
                 )
                 results.append(
                     {
                         "ok": False,
                         "error": "FILE_EXCEEDS_INGRESS_LIMIT",
-                        "rel": str(sp),
-                        "bundle_main_rel": rel,
-                        "bytes": ssz,
+                        "rel": rel,
+                        "bytes": sz,
                     }
                 )
                 if candidate_key:
@@ -704,170 +765,224 @@ def cmd_upload(
                         settings.db_path,
                         candidate_key=candidate_key,
                         error_code="FILE_EXCEEDS_INGRESS_LIMIT",
-                        error_message=f"sub file too large: {ssz}",
+                        error_message=f"main file too large: {sz}",
                         terminal=True,
                     )
-                oversized_sub = True
-                break
-        if oversized_sub:
-            continue
-        resp: dict[str, Any] | None = None
-        item = req_payload.get("item") if isinstance(req_payload.get("item"), dict) else {}
-        source_sha = str((item or {}).get("sha256") or "").strip().lower()
-        # [변경사유]: 장부에 있고 묶음이 아니면 파일 생략 (caption-only)
-        caption_only = (
-            not sub_paths
-            and len(source_sha) == 64
-            and is_uploaded_sha(settings.db_path, source_sha)
-        )
-        try:
-            try:
-                resp = upload_one(
-                    endpoint=ep,
-                    payload=req_payload,
-                    file_path=file_path,
-                    cookie=cookie,
-                    sub_file_paths=sub_paths,
-                    caption_only=caption_only,
-                )
-            except UploadHttpError as e:
-                # [변경사유]: 서버가 exact를 못 찾으면 장부 지우고 파일 재전송 1회
-                if (
-                    caption_only
-                    and e.code in CAPTION_ONLY_FALLBACK_CODES
-                    and file_path.is_file()
-                ):
-                    log.info(
-                        "caption-only fallback rel=%s code=%s",
-                        rel,
-                        e.code,
+                    release_candidate_lease(
+                        settings.db_path,
+                        candidate_key=candidate_key,
+                        owner=run_owner,
                     )
-                    forget_uploaded_sha(settings.db_path, source_sha)
+                continue
+            # [변경사유]: Phase 4.2+ — sub 도 파일별 ingress 검사
+            oversized_sub = False
+            for sp in sub_paths:
+                try:
+                    ssz = sp.stat().st_size
+                except OSError:
+                    ssz = -1
+                if exceeds_ingress_limit(ssz):
+                    log.warning(
+                        "skip upload oversized sub rel=%s bytes=%s",
+                        sp.name,
+                        ssz,
+                    )
+                    results.append(
+                        {
+                            "ok": False,
+                            "error": "FILE_EXCEEDS_INGRESS_LIMIT",
+                            "rel": str(sp),
+                            "bundle_main_rel": rel,
+                            "bytes": ssz,
+                        }
+                    )
+                    if candidate_key:
+                        mark_candidate_retry(
+                            settings.db_path,
+                            candidate_key=candidate_key,
+                            error_code="FILE_EXCEEDS_INGRESS_LIMIT",
+                            error_message=f"sub file too large: {ssz}",
+                            terminal=True,
+                        )
+                    oversized_sub = True
+                    break
+            if oversized_sub:
+                continue
+            resp: dict[str, Any] | None = None
+            item = req_payload.get("item") if isinstance(req_payload.get("item"), dict) else {}
+            source_sha = str((item or {}).get("sha256") or "").strip().lower()
+            # [변경사유]: 장부에 있고 묶음이 아니면 파일 생략 (caption-only)
+            caption_only = (
+                not sub_paths
+                and len(source_sha) == 64
+                and is_uploaded_sha(settings.db_path, source_sha)
+            )
+            try:
+                try:
                     resp = upload_one(
                         endpoint=ep,
                         payload=req_payload,
                         file_path=file_path,
                         cookie=cookie,
                         sub_file_paths=sub_paths,
-                        caption_only=False,
+                        caption_only=caption_only,
                     )
-                    caption_only = False
-                else:
-                    raise
-            results.append(
-                {
-                    "ok": True,
-                    "rel": rel,
-                    "sub_count": 0 if caption_only else len(sub_paths),
-                    "caption_only": caption_only,
-                    "response": resp,
-                }
-            )
-            fields = response_ledger_fields(resp)
-            rec_sha = fields.get("source_sha256") or source_sha
-            next_val = fields.get("next_val")
-            if rec_sha:
-                # [변경사유]: ocr_idx·거부·지문을 장부에 남겨 caption-only/재실행에 사용
-                record_uploaded_sha(
-                    settings.db_path,
-                    source_sha256=rec_sha,
-                    request_idx=fields.get("request_idx"),
-                    next_val=next_val,
-                    final_sha_prefix=fields.get("final_sha_prefix"),
-                    ocr_idx=fields.get("ocr_idx"),
-                    media_fingerprint=str(req_payload.get("media_fingerprint") or "")
-                    or None,
-                    caption_fingerprint=str(req_payload.get("caption_fingerprint") or "")
-                    or None,
-                    rejected=next_val == "already_rejected",
+                except UploadHttpError as e:
+                    # [변경사유]: 서버가 exact를 못 찾으면 장부 지우고 파일 재전송 1회
+                    if (
+                        caption_only
+                        and e.code in CAPTION_ONLY_FALLBACK_CODES
+                        and file_path.is_file()
+                    ):
+                        log.info(
+                            "caption-only fallback rel=%s code=%s",
+                            rel,
+                            e.code,
+                        )
+                        forget_uploaded_sha(settings.db_path, source_sha)
+                        resp = upload_one(
+                            endpoint=ep,
+                            payload=req_payload,
+                            file_path=file_path,
+                            cookie=cookie,
+                            sub_file_paths=sub_paths,
+                            caption_only=False,
+                        )
+                        caption_only = False
+                    else:
+                        raise
+                results.append(
+                    {
+                        "ok": True,
+                        "rel": rel,
+                        "sub_count": 0 if caption_only else len(sub_paths),
+                        "caption_only": caption_only,
+                        "response": resp,
+                    }
                 )
-            if candidate_key:
-                mark_candidate_uploaded(
-                    settings.db_path,
-                    candidate_key=candidate_key,
-                    request_idx=fields.get("request_idx"),
-                    ocr_idx=fields.get("ocr_idx"),
-                )
-        except Exception as e:  # noqa: BLE001 — 배치 계속
-            results.append({"ok": False, "error": str(e), "rel": rel})
-            if candidate_key:
-                terminal = False
-                err_code = e.__class__.__name__
-                if isinstance(e, UploadHttpError):
-                    err_code = str(e.code or f"HTTP_{e.status}")
-                    terminal = int(e.status or 0) >= 400 and int(e.status or 0) < 500
-                mark_candidate_retry(
-                    settings.db_path,
-                    candidate_key=candidate_key,
-                    error_code=err_code,
-                    error_message=str(e),
-                    terminal=terminal,
-                )
+                fields = response_ledger_fields(resp)
+                rec_sha = fields.get("source_sha256") or source_sha
+                next_val = fields.get("next_val")
+                if rec_sha:
+                    # [변경사유]: ocr_idx·거부·지문을 장부에 남겨 caption-only/재실행에 사용
+                    record_uploaded_sha(
+                        settings.db_path,
+                        source_sha256=rec_sha,
+                        request_idx=fields.get("request_idx"),
+                        next_val=next_val,
+                        final_sha_prefix=fields.get("final_sha_prefix"),
+                        ocr_idx=fields.get("ocr_idx"),
+                        media_fingerprint=str(req_payload.get("media_fingerprint") or "")
+                        or None,
+                        caption_fingerprint=str(req_payload.get("caption_fingerprint") or "")
+                        or None,
+                        rejected=next_val == "already_rejected",
+                    )
+                if candidate_key:
+                    mark_candidate_uploaded(
+                        settings.db_path,
+                        candidate_key=candidate_key,
+                        request_idx=fields.get("request_idx"),
+                        ocr_idx=fields.get("ocr_idx"),
+                    )
+            except Exception as e:  # noqa: BLE001 — 배치 계속
+                results.append({"ok": False, "error": str(e), "rel": rel})
+                if candidate_key:
+                    terminal = False
+                    err_code = e.__class__.__name__
+                    if isinstance(e, UploadHttpError):
+                        err_code = str(e.code or f"HTTP_{e.status}")
+                        terminal = int(e.status or 0) >= 400 and int(e.status or 0) < 500
+                    mark_candidate_retry(
+                        settings.db_path,
+                        candidate_key=candidate_key,
+                        error_code=err_code,
+                        error_message=str(e),
+                        terminal=terminal,
+                    )
+            finally:
+                if candidate_key:
+                    release_candidate_lease(
+                        settings.db_path,
+                        candidate_key=candidate_key,
+                        owner=run_owner,
+                    )
 
-        # [변경사유]: 마지막 건 제외 — 장당 유휴로 frontend/OCR/similar 부하 완화
-        if idx < len(upload_queue) - 1:
-            wait = idle_after_upload_sec(
-                base_sleep_sec=pace_sleep,
-                ocr_extra_sec=pace_ocr_extra,
-                response=resp,
-            )
-            if wait > 0:
-                log.info(
-                    "upload idle %.1fs after rel=%s next=%s (%s/%s)",
-                    wait,
-                    Path(rel).name,
-                    (resp or {}).get("next"),
-                    idx + 1,
-                    len(upload_queue),
+            # [변경사유]: 마지막 건 제외 — 장당 유휴로 frontend/OCR/similar 부하 완화
+            if idx < len(upload_queue) - 1:
+                wait = idle_after_upload_sec(
+                    base_sleep_sec=pace_sleep,
+                    ocr_extra_sec=pace_ocr_extra,
+                    response=resp,
                 )
-                time.sleep(wait)
+                if wait > 0:
+                    log.info(
+                        "upload idle %.1fs after rel=%s next=%s (%s/%s)",
+                        wait,
+                        Path(rel).name,
+                        (resp or {}).get("next"),
+                        idx + 1,
+                        len(upload_queue),
+                    )
+                    time.sleep(wait)
 
-    ok_n = sum(1 for r in results if r.get("ok"))
-    fail_n = len(results) - ok_n
-    summary = build_upload_summary(
-        dry_run=False,
-        classified=classified,
-        ok=ok_n,
-        fail=fail_n,
-        allow_empty_caption=not strict_adjacent,
-    )
-    summary["UPLOAD_SLEEP_SEC"] = pace_sleep
-    summary["UPLOAD_OCR_EXTRA_SEC"] = pace_ocr_extra
-    detail = {
-        "summary": summary,
-        "manifest": str(out),
-        "results": results,
-        "empty_adjacent": classified["empty_adjacent"],
-        "file_missing": classified["file_missing"],
-        "similar_skipped": similar_skipped,
-        "similar_deferred_groups": similar_deferred_groups,
-        "candidate_sync": candidate_sync,
-        "classification_state": classification_state,
-        "grouped_photo_candidates": list(manifest.get("grouped_photo_candidates") or []),
-        "bundled_groups": list(manifest.get("bundled_groups") or []),
-        "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
-    }
-    write_upload_result_json(result_path, detail)
-    log.info(
-        "upload done OK=%s FAIL=%s EMPTY_CONTEXT=%s FILE_MISSING=%s sleep=%s ocr_extra=%s",
-        ok_n,
-        fail_n,
-        classified["empty_adjacent_count"],
-        classified["file_missing_count"],
-        pace_sleep,
-        pace_ocr_extra,
-    )
-    # photos_root unused warning avoid — kept for path parity with classify
-    _ = photos_root
-    return {
-        **summary,
-        "item_count": len(results),
-        # [변경사유]: 콘솔 한글 요약용
-        "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
-        "candidate_sync": candidate_sync,
-        "classification_state": classification_state,
-        "ok": ok_n,
-        "fail": fail_n,
-        "manifest": str(out),
-        "result_json": str(result_path),
-    }
+        ok_n = sum(1 for r in results if r.get("ok"))
+        fail_n = len(results) - ok_n
+        summary = build_upload_summary(
+            dry_run=False,
+            classified=classified,
+            ok=ok_n,
+            fail=fail_n,
+            allow_empty_caption=not strict_adjacent,
+        )
+        summary["UPLOAD_SLEEP_SEC"] = pace_sleep
+        summary["UPLOAD_OCR_EXTRA_SEC"] = pace_ocr_extra
+        # [변경사유]: HTTP 건수와 신규 OCR(next=ocr_queued) 혼동 방지
+        outcomes = aggregate_upload_server_outcomes(results)
+        summary.update(outcomes)
+        detail = {
+            "summary": summary,
+            "manifest": str(out),
+            "results": results,
+            "empty_adjacent": classified["empty_adjacent"],
+            "file_missing": classified["file_missing"],
+            "similar_skipped": similar_skipped,
+            "similar_deferred_groups": similar_deferred_groups,
+            "candidate_sync": candidate_sync,
+            "classification_state": classification_state,
+            "grouped_photo_candidates": list(manifest.get("grouped_photo_candidates") or []),
+            "bundled_groups": list(manifest.get("bundled_groups") or []),
+            "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
+            "server_outcomes": outcomes,
+        }
+        write_upload_result_json(result_path, detail)
+        log.info(
+            "upload done OK=%s FAIL=%s EMPTY_CONTEXT=%s FILE_MISSING=%s "
+            "ocr_queued=%s by_next=%s sleep=%s ocr_extra=%s",
+            ok_n,
+            fail_n,
+            classified["empty_adjacent_count"],
+            classified["file_missing_count"],
+            outcomes.get("ocr_queued"),
+            outcomes.get("by_next"),
+            pace_sleep,
+            pace_ocr_extra,
+        )
+        # photos_root unused warning avoid — kept for path parity with classify
+        _ = photos_root
+        return {
+            **summary,
+            "item_count": len(results),
+            # [변경사유]: 콘솔 한글 요약용
+            "bundle_collapsed_count": int(manifest.get("bundle_collapsed_count") or 0),
+            "candidate_sync": candidate_sync,
+            "classification_state": classification_state,
+            "ok": ok_n,
+            "fail": fail_n,
+            "manifest": str(out),
+            "result_json": str(result_path),
+        }
+    finally:
+        # [변경사유]: I1 — process lock 해제
+        release_run_lock(settings.db_path, lock_name="upload", owner=run_owner)
+

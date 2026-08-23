@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,25 @@ def _dataset_basename(*, room_id: str, sha256: str, file_name: str) -> str:
     return f"{safe_room}__{sha256[:12]}__{stem}"
 
 
+def _write_sync_log(
+    conn: sqlite3.Connection,
+    *,
+    sha256: str,
+    room_id: str,
+    status: str,
+    dest_name: str | None,
+    result: str,
+) -> None:
+    """[변경사유]: B2 — sync 시도마다 poster_sync_log 기록."""
+    conn.execute(
+        """
+        INSERT INTO poster_sync_log (sha256, room_id, status, dest_name, result, synced_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (sha256.lower(), room_id, status, dest_name, result),
+    )
+
+
 def cmd_poster_dataset_sync(
     settings,
     *,
@@ -38,6 +58,7 @@ def cmd_poster_dataset_sync(
     """
     source=human 이고 poster|non_poster 인 행을 dataset/ 로 복사.
     uncertain 스킵. 반대 폴더에 같은 sha 접두 파일이 있으면 제거 후 올바른 쪽에 복사.
+    [변경사유]: B2 — 복사/스킵/누락마다 poster_sync_log 에 이력 남김.
     """
     root = settings.export_root
     if root is None or not Path(root).is_dir():
@@ -55,6 +76,7 @@ def cmd_poster_dataset_sync(
     missing = 0
     moved_away = 0
     errors = 0
+    logged = 0
 
     with connect(settings.db_path) as conn:
         ensure_poster_schema(conn)
@@ -72,6 +94,7 @@ def cmd_poster_dataset_sync(
         seen_sha: set[str] = set()
         for r in rows:
             sha = str(r["sha256"] or "").lower()
+            room_id = str(r["room_id"] or "room")
             if len(sha) != 64 or sha in seen_sha:
                 skipped += 1
                 continue
@@ -93,15 +116,24 @@ def cmd_poster_dataset_sync(
             src = resolve_photo_path(Path(root), str(r["rel_path"] or ""))
             if src is None or not src.is_file():
                 missing += 1
+                _write_sync_log(
+                    conn,
+                    sha256=sha,
+                    room_id=room_id,
+                    status=status,
+                    dest_name=None,
+                    result="missing",
+                )
+                logged += 1
                 log.warning(
                     "dataset sync missing src room=%s sha=%s rel=%s",
-                    r["room_id"],
+                    room_id,
                     sha[:12],
                     r["rel_path"],
                 )
                 continue
             dest_name = _dataset_basename(
-                room_id=str(r["room_id"] or "room"),
+                room_id=room_id,
                 sha256=sha,
                 file_name=str(r["file_name"] or src.name),
             )
@@ -109,9 +141,27 @@ def cmd_poster_dataset_sync(
             try:
                 if dest.is_file() and dest.stat().st_size == src.stat().st_size:
                     skipped += 1
+                    _write_sync_log(
+                        conn,
+                        sha256=sha,
+                        room_id=room_id,
+                        status=status,
+                        dest_name=dest_name,
+                        result="skipped",
+                    )
+                    logged += 1
                     continue
                 shutil.copy2(src, dest)
                 copied += 1
+                _write_sync_log(
+                    conn,
+                    sha256=sha,
+                    room_id=room_id,
+                    status=status,
+                    dest_name=dest_name,
+                    result="copied",
+                )
+                logged += 1
                 log.info(
                     "dataset sync copy status=%s sha=%s dest=%s",
                     status,
@@ -120,7 +170,18 @@ def cmd_poster_dataset_sync(
                 )
             except OSError as exc:
                 errors += 1
+                _write_sync_log(
+                    conn,
+                    sha256=sha,
+                    room_id=room_id,
+                    status=status,
+                    dest_name=dest_name,
+                    result="error",
+                )
+                logged += 1
                 log.warning("dataset sync copy fail sha=%s err=%s", sha[:12], exc)
+
+        conn.commit()
 
     out = {
         "ok": errors == 0,
@@ -129,6 +190,7 @@ def cmd_poster_dataset_sync(
         "missing": missing,
         "removed_opposite": moved_away,
         "errors": errors,
+        "sync_log_rows": logged,
         "poster_dir": str(p_dir),
         "non_poster_dir": str(n_dir),
     }

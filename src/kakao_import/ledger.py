@@ -44,6 +44,33 @@ def is_uploaded_sha(db_path: Path, source_sha256: str) -> bool:
         return bool(row)
 
 
+def is_uploaded_media_fingerprint(db_path: Path, media_fingerprint: str) -> bool:
+    """
+    미디어 지문만으로 장부 존재 여부.
+    [변경사유]: I1 — 캡션이 바뀌어도 동일 미디어면 full 재전송 금지 (caption-only/스킵 분기용)
+    """
+    media_fp = normalize_sha(media_fingerprint)
+    if len(media_fp) != 64:
+        return False
+    with connect(db_path) as conn:
+        if not _has_ledger(conn):
+            return False
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM uploaded_sha_ledger
+            WHERE IFNULL(rejected, 0) = 0
+              AND (
+                lower(IFNULL(media_fingerprint, '')) = ?
+                OR lower(source_sha256) = ?
+              )
+            LIMIT 1
+            """,
+            (media_fp, media_fp),
+        ).fetchone()
+        return bool(row)
+
+
 def has_uploaded_fingerprint(
     db_path: Path,
     *,

@@ -129,14 +129,121 @@ def upsert_photo_signatures(
     return {"signed": ok, "skipped": skip, "missing": miss, "errors": err}
 
 
+def _member_fingerprint(photo_ids: list[int] | tuple[int, ...] | set[int]) -> str:
+    """멤버 집합 안정 키 — rebuild 시 decision 복원용."""
+    return ",".join(str(x) for x in sorted({int(p) for p in photo_ids}))
+
+
+def _snapshot_non_deferred_decisions(
+    conn: sqlite3.Connection, *, workspace_key: str
+) -> dict[str, dict[str, Any]]:
+    """
+    [변경사유]: similar-detect 재실행 시 DELETE 전에 사람/확정 decision 보존.
+    deferred 는 스냅샷하지 않음(항상 새로 deferred).
+    """
+    groups = conn.execute(
+        """
+        SELECT id, decision, representative_photo_id
+        FROM similar_image_group
+        WHERE workspace_key = ? AND decision != 'deferred'
+        """,
+        (workspace_key,),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for g in groups:
+        gid = int(g["id"])
+        mems = conn.execute(
+            """
+            SELECT photo_id, subgroup_key, is_subgroup_rep, is_representative
+            FROM similar_image_member
+            WHERE group_id = ?
+            ORDER BY photo_id
+            """,
+            (gid,),
+        ).fetchall()
+        pids = [int(m["photo_id"]) for m in mems]
+        if len(pids) < 2:
+            continue
+        fp = _member_fingerprint(pids)
+        decision = str(g["decision"])
+        snap: dict[str, Any] = {
+            "decision": decision,
+            "representative_photo_id": (
+                int(g["representative_photo_id"])
+                if g["representative_photo_id"] is not None
+                else None
+            ),
+            "subgroups": None,
+        }
+        if decision == "partial":
+            by_key: dict[str, list[dict[str, Any]]] = {}
+            for m in mems:
+                key = str(m["subgroup_key"] or f"solo-{int(m['photo_id'])}")
+                by_key.setdefault(key, []).append(
+                    {
+                        "photo_id": int(m["photo_id"]),
+                        "is_subgroup_rep": int(m["is_subgroup_rep"] or 0),
+                    }
+                )
+            subgroups: list[dict[str, Any]] = []
+            for key, rows in by_key.items():
+                photo_ids = [r["photo_id"] for r in rows]
+                rep = next(
+                    (r["photo_id"] for r in rows if r["is_subgroup_rep"]),
+                    photo_ids[0],
+                )
+                subgroups.append(
+                    {
+                        "subgroup_key": key,
+                        "photo_ids": photo_ids,
+                        "representative_photo_id": rep,
+                    }
+                )
+            snap["subgroups"] = subgroups
+        out[fp] = snap
+    log.info(
+        "similar decision snapshot non_deferred=%s workspace=%s",
+        len(out),
+        workspace_key,
+    )
+    return out
+
+
+def _apply_restored_decision(
+    conn: sqlite3.Connection,
+    *,
+    group_id: int,
+    snap: dict[str, Any],
+) -> None:
+    """스냅샷 decision 을 새 group_id 에 적용 (set_similar_group_decision 재사용)."""
+    decision = str(snap["decision"])
+    rep = snap.get("representative_photo_id")
+    subgroups = snap.get("subgroups")
+    set_similar_group_decision(
+        conn,
+        group_id=group_id,
+        decision=decision,
+        representative_photo_id=int(rep) if rep is not None else None,
+        subgroups=subgroups if decision == "partial" else None,
+    )
+
+
 def rebuild_similar_groups(
     conn: sqlite3.Connection,
     *,
     max_distance: int = DEFAULT_SIMILAR_MAX_DISTANCE,
     workspace_key: str = "current",
+    room_ids: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """signature 기반 그룹 재구성. decision 기본 deferred. upload 큐는 건드리지 않음."""
-    # [변경사유]: SHA 완전 동일(업로드 제외) 장은 similar-review에 넣지 않음 — AllDup 대체
+    """signature 기반 그룹 재구성. decision 기본 deferred. upload 큐는 건드리지 않음.
+
+    room_ids 가 있으면 해당 방 photo 가 속한 그룹만 지우고 재구성 — 타 방 그룹 보존.
+    """
+    from kakao_import.pipeline import normalize_room_ids, room_id_from_rel
+
+    want = normalize_room_ids(room_ids)
+    # [변경사유]: 재클러스터 전 non-deferred decision 보존 (스케줄 매일 detect 대비)
+    preserved_all = _snapshot_non_deferred_decisions(conn, workspace_key=workspace_key)
     skip_row = conn.execute(
         """
         SELECT COUNT(*) AS n
@@ -148,7 +255,7 @@ def rebuild_similar_groups(
     skipped_exact = int(skip_row["n"] if skip_row else 0)
     rows = conn.execute(
         """
-        SELECT s.photo_id, s.dhash_hex, s.phash_hex, p.sha256
+        SELECT s.photo_id, s.dhash_hex, s.phash_hex, p.sha256, p.rel_path
         FROM photo_signature s
         JOIN photo_file p ON p.id = s.photo_id
         WHERE s.photo_id NOT IN (
@@ -163,6 +270,59 @@ def rebuild_similar_groups(
     if skip_poster_ids:
         rows = [r for r in rows if int(r["photo_id"]) not in skip_poster_ids]
         log.info("similar skip poster_non_poster photos=%s", len(skip_poster_ids))
+
+    if want:
+        rows = [
+            r for r in rows if room_id_from_rel(str(r["rel_path"] or "")) in want
+        ]
+        log.info("similar room filter rooms=%s photos=%s", sorted(want), len(rows))
+
+    room_photo_ids = {int(r["photo_id"]) for r in rows}
+    delete_group_ids: list[int] = []
+    if want:
+        if not room_photo_ids:
+            log.info("similar room rebuild skip empty photos rooms=%s", sorted(want))
+            return {
+                "ok": True,
+                "signatures": 0,
+                "skipped_exact": skipped_exact,
+                "skipped_poster": len(skip_poster_ids),
+                "groups": 0,
+                "members": 0,
+                "max_distance": max_distance,
+                "workspace_key": workspace_key,
+                "decisions_restored": 0,
+                "decisions_restore_failed": 0,
+                "decisions_preserved_keys": 0,
+                "room_ids": sorted(want),
+                "skipped_empty": True,
+            }
+        ph = ",".join("?" for _ in room_photo_ids)
+        g_rows = conn.execute(
+            f"""
+            SELECT DISTINCT m.group_id
+            FROM similar_image_member m
+            JOIN similar_image_group g ON g.id = m.group_id
+            WHERE g.workspace_key = ? AND m.photo_id IN ({ph})
+            """,
+            (workspace_key, *sorted(room_photo_ids)),
+        ).fetchall()
+        delete_group_ids = [int(r["group_id"]) for r in g_rows]
+        preserved: dict[str, Any] = {}
+        for gid in delete_group_ids:
+            mems = conn.execute(
+                """
+                SELECT photo_id FROM similar_image_member
+                WHERE group_id = ? ORDER BY photo_id
+                """,
+                (gid,),
+            ).fetchall()
+            fp = _member_fingerprint([int(m["photo_id"]) for m in mems])
+            if fp in preserved_all:
+                preserved[fp] = preserved_all[fp]
+    else:
+        preserved = preserved_all
+
     photos = [
         PhotoSig(
             photo_id=int(r["photo_id"]),
@@ -174,25 +334,57 @@ def rebuild_similar_groups(
     ]
     clusters = cluster_similar_photos(photos, max_distance=max_distance)
     log.info(
-        "similar groups skip_exact=%s cluster_photos=%s groups=%s members=%s dist=%s",
+        "similar groups skip_exact=%s cluster_photos=%s groups=%s members=%s dist=%s room=%s",
         skipped_exact,
         len(photos),
         len(clusters),
         sum(len(c.photo_ids) for c in clusters),
         max_distance,
+        sorted(want) if want else None,
     )
 
-    conn.execute(
-        "DELETE FROM similar_image_member WHERE group_id IN "
-        "(SELECT id FROM similar_image_group WHERE workspace_key = ?)",
-        (workspace_key,),
-    )
-    conn.execute(
-        "DELETE FROM similar_image_group WHERE workspace_key = ?",
-        (workspace_key,),
-    )
+    if want:
+        if delete_group_ids:
+            gph = ",".join("?" for _ in delete_group_ids)
+            conn.execute(
+                f"DELETE FROM similar_image_member WHERE group_id IN ({gph})",
+                tuple(delete_group_ids),
+            )
+            conn.execute(
+                f"DELETE FROM similar_image_group WHERE id IN ({gph})",
+                tuple(delete_group_ids),
+            )
+    else:
+        conn.execute(
+            "DELETE FROM similar_image_member WHERE group_id IN "
+            "(SELECT id FROM similar_image_group WHERE workspace_key = ?)",
+            (workspace_key,),
+        )
+        conn.execute(
+            "DELETE FROM similar_image_group WHERE workspace_key = ?",
+            (workspace_key,),
+        )
 
-    for i, c in enumerate(clusters, start=1):
+    restored = 0
+    restore_fail = 0
+    start_i = 1
+    if want:
+        import re
+
+        max_key_row = conn.execute(
+            """
+            SELECT group_key FROM similar_image_group
+            WHERE workspace_key = ? AND group_key LIKE 'sg-%'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (workspace_key,),
+        ).fetchone()
+        if max_key_row:
+            m = re.search(r"sg-(\d+)", str(max_key_row["group_key"] or ""))
+            if m:
+                start_i = int(m.group(1)) + 1
+
+    for i, c in enumerate(clusters, start=start_i):
         gkey = f"sg-{i:04d}"
         cur = conn.execute(
             """
@@ -218,8 +410,31 @@ def rebuild_similar_groups(
                 """,
                 (gid, pid, 1 if pid == c.representative_photo_id else 0),
             )
+        fp = _member_fingerprint(c.photo_ids)
+        snap = preserved.get(fp)
+        if snap:
+            try:
+                _apply_restored_decision(conn, group_id=gid, snap=snap)
+                restored += 1
+            except ValueError as exc:
+                log.warning(
+                    "similar decision restore fail group=%s fp=%s err=%s",
+                    gkey,
+                    fp[:48],
+                    str(exc)[:120],
+                )
+                restore_fail += 1
 
+    log.info(
+        "similar rebuild restore restored=%s failed=%s new_deferred=%s preserved_keys=%s room=%s",
+        restored,
+        restore_fail,
+        len(clusters) - restored,
+        len(preserved),
+        sorted(want) if want else None,
+    )
     return {
+        "ok": True,
         "signatures": len(photos),
         "skipped_exact": skipped_exact,
         "skipped_poster": len(skip_poster_ids),
@@ -227,7 +442,12 @@ def rebuild_similar_groups(
         "members": sum(len(c.photo_ids) for c in clusters),
         "max_distance": max_distance,
         "workspace_key": workspace_key,
+        "decisions_restored": restored,
+        "decisions_restore_failed": restore_fail,
+        "decisions_preserved_keys": len(preserved),
+        "room_ids": sorted(want) if want else None,
     }
+
 
 
 def list_similar_groups(conn: sqlite3.Connection, *, workspace_key: str = "current") -> list[dict[str, Any]]:

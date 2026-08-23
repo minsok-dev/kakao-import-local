@@ -68,6 +68,17 @@ def excluded_poster_photo_ids(conn: sqlite3.Connection) -> set[int]:
     return ids
 
 
+def has_any_classify_for_sha(conn: sqlite3.Connection, sha256: str) -> bool:
+    """해당 sha에 poster_classify 행이 하나라도 있으면 True."""
+    if not poster_tables_exist(conn):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM poster_classify WHERE lower(sha256) = ? LIMIT 1",
+        (sha256.lower(),),
+    ).fetchone()
+    return row is not None
+
+
 def get_classify_row(
     conn: sqlite3.Connection, room_id: str, sha256: str
 ) -> dict[str, Any] | None:

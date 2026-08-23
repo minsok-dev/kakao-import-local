@@ -36,6 +36,13 @@ def _root_opt(ctx: click.Context, root: Path | None) -> Path:
     return Path(target)
 
 
+def _rooms_opt(rooms: tuple[str, ...]) -> list[str] | None:
+    """CLI --room 다중 → list 또는 None(전체)."""
+    # [변경사유]: collect E2E 방 한정과 동일 계약
+    out = [r.strip() for r in rooms if r and r.strip()]
+    return out or None
+
+
 @main.command("init")
 @click.option("--reset", is_flag=True, help="기존 DB 삭제 후 재생성")
 @click.pass_context
@@ -218,11 +225,16 @@ def _echo_run_summary_ko(out: dict) -> None:
 
 @main.command("run")
 @click.option("--root", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+@click.option("--room", "rooms", multiple=True, help="방 id. 여러 번 가능. 생략=전체")
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
-def run_cmd(ctx: click.Context, root: Path | None, as_json: bool) -> None:
+def run_cmd(
+    ctx: click.Context, root: Path | None, rooms: tuple[str, ...], as_json: bool
+) -> None:
     """Phase1+2: init(필요시)→scan→parse→match→hash→merge→report."""
-    out = pipe.cmd_run(ctx.obj["settings"], _root_opt(ctx, root))
+    out = pipe.cmd_run(
+        ctx.obj["settings"], _root_opt(ctx, root), room_ids=_rooms_opt(rooms)
+    )
     if as_json:
         click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     else:
@@ -321,6 +333,7 @@ def export_payload_cmd(
         "env KAKAO_IMPORT_UPLOAD_OCR_EXTRA_SEC"
     ),
 )
+@click.option("--room", "rooms", multiple=True, help="방 id. 여러 번 가능. 생략=전체")
 @click.pass_context
 def upload_cmd(
     ctx: click.Context,
@@ -334,6 +347,7 @@ def upload_cmd(
     result_json: Path | None,
     sleep_sec: float | None,
     ocr_extra_sec: float | None,
+    rooms: tuple[str, ...],
 ) -> None:
     """Phase3: Import 업로드 (기본 dry-run). 이미지만 있는 건도 기본 업로드."""
     settings = ctx.obj["settings"]
@@ -349,6 +363,7 @@ def upload_cmd(
         result_json=result_json,
         sleep_sec=sleep_sec,
         ocr_extra_sec=ocr_extra_sec,
+        room_ids=_rooms_opt(rooms),
     )
     # [변경사유]: Phase 3.5 P4 — 콘솔은 요약만 (전체 JSON+emoji로 cp949 깨짐 방지)
     upload_mod.echo_summary_safe(summary)
@@ -380,6 +395,7 @@ def _settings_with_db(ctx: click.Context, db: Path | None):
 )
 @click.option("--limit", type=int, default=None, help="서명 계산 상한 (테스트용)")
 @click.option("--force-resign", is_flag=True, help="기존 signature 재계산")
+@click.option("--room", "rooms", multiple=True, help="방 id. 여러 번 가능. 생략=전체")
 @click.pass_context
 def similar_detect_cmd(
     ctx: click.Context,
@@ -388,6 +404,7 @@ def similar_detect_cmd(
     max_distance: int | None,
     limit: int | None,
     force_resign: bool,
+    rooms: tuple[str, ...],
 ) -> None:
     """사진 signature 계산 + similar 그룹 탐지 (detect-only)."""
     settings = _settings_with_db(ctx, db)
@@ -397,6 +414,7 @@ def similar_detect_cmd(
         max_distance=max_distance,
         limit=limit,
         force_resign=force_resign,
+        room_ids=_rooms_opt(rooms),
     )
     click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     if not out.get("ok"):
@@ -503,6 +521,7 @@ def poster_train_cmd(ctx: click.Context) -> None:
 @click.option("--port", type=int, default=8766, show_default=True)
 @click.option("--no-browser", is_flag=True, help="리뷰 화면 브라우저 자동 실행 안 함")
 @click.option("--no-review", is_flag=True, help="분류 후 poster-review UI를 띄우지 않음")
+@click.option("--room", "rooms", multiple=True, help="방 id. 여러 번 가능. 생략=전체")
 @click.pass_context
 def poster_classify_cmd(
     ctx: click.Context,
@@ -511,13 +530,14 @@ def poster_classify_cmd(
     port: int,
     no_browser: bool,
     no_review: bool,
+    rooms: tuple[str, ...],
 ) -> None:
     """활성 모델로 photo_file 판정 후, 기본으로 poster-review UI까지 연다."""
     from kakao_import.poster_classify import cmd_poster_classify
 
     settings = ctx.obj["settings"]
     target = root or settings.export_root
-    out = cmd_poster_classify(settings, target)
+    out = cmd_poster_classify(settings, target, room_ids=_rooms_opt(rooms))
     click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     if not out.get("ok"):
         raise click.ClickException(str(out.get("error") or "poster-classify failed"))
@@ -600,6 +620,47 @@ def poster_label_cmd(ctx: click.Context, sha: str, status: str, room_id: str | N
     click.echo(json.dumps(out, ensure_ascii=False, indent=2))
     if not out.get("ok"):
         raise click.ClickException(str(out.get("error") or "poster-label failed"))
+
+
+@main.command("poster-dataset-sync")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.pass_context
+def poster_dataset_sync_cmd(ctx: click.Context, db: Path | None) -> None:
+    """human poster/non_poster 라벨을 dataset/ 로 복사 (원본 불변)."""
+    from kakao_import.poster_dataset_sync import cmd_poster_dataset_sync
+
+    settings = _settings_with_db(ctx, db)
+    out = cmd_poster_dataset_sync(settings)
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "poster-dataset-sync failed"))
+
+
+@main.command("poster-retrain-from-review")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--activate",
+    is_flag=True,
+    help="train 후 poster-activate (게이트 실패 시 활성 유지)",
+)
+@click.option("--activate-force", is_flag=True, help="activate 게이트 무시")
+@click.pass_context
+def poster_retrain_from_review_cmd(
+    ctx: click.Context,
+    db: Path | None,
+    activate: bool,
+    activate_force: bool,
+) -> None:
+    """dataset-sync + poster-train (+ 선택 activate). 수집 체인과 분리 실행."""
+    from kakao_import.poster_dataset_sync import cmd_poster_retrain_from_review
+
+    settings = _settings_with_db(ctx, db)
+    out = cmd_poster_retrain_from_review(
+        settings, activate=activate, activate_force=activate_force
+    )
+    click.echo(json.dumps(out, ensure_ascii=False, indent=2))
+    if not out.get("ok"):
+        raise click.ClickException(str(out.get("error") or "poster-retrain-from-review failed"))
 
 
 @main.command("hold-report")

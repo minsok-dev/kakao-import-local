@@ -9,7 +9,7 @@ from typing import Any
 
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
-from kakao_import.pipeline import room_id_from_rel
+from kakao_import.pipeline import normalize_room_ids, room_id_from_rel
 from kakao_import.poster_ahash import image_min_side_and_bytes
 from kakao_import.poster_const import (
     ACTIVE_MODEL_PATH,
@@ -119,12 +119,15 @@ def cmd_poster_classify(
     root: Path | None = None,
     *,
     models_dir: Path | None = None,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     """
     photo_file(sha 있음) 판정. 활성 모델 없으면 no-op.
     extra 없음·오류 → 제외하지 않음.
+    room_ids 있으면 해당 방만.
     """
     root = root or settings.export_root
+    want = normalize_room_ids(room_ids)
     if not settings.db_path.exists():
         log.info("poster-classify skip no-db")
         return {"ok": True, "skipped": "no_db", "classified": 0}
@@ -155,6 +158,7 @@ def cmd_poster_classify(
         "fail_open": 0,
         "skipped_human": 0,
         "missing_file": 0,
+        "skipped_room": 0,
     }
     with connect(settings.db_path) as conn:
         ensure_poster_schema(conn)
@@ -166,13 +170,21 @@ def cmd_poster_classify(
             ORDER BY id
             """
         ).fetchall()
-        log.info("poster-classify photos=%s version=%s", len(rows), version)
+        log.info(
+            "poster-classify photos=%s version=%s rooms=%s",
+            len(rows),
+            version,
+            sorted(want) if want else None,
+        )
         for row in rows:
             photo_id = int(row["id"])
             rel = str(row["rel_path"] or "").replace("\\", "/")
             name = str(row["file_name"] or Path(rel).name)
             sha = str(row["sha256"]).lower()
             room_id = room_id_from_rel(rel)
+            if want and room_id not in want:
+                counts["skipped_room"] += 1
+                continue
             abs_path = (root / rel) if root else None
             if abs_path is None or not abs_path.is_file():
                 counts["missing_file"] += 1
@@ -242,4 +254,4 @@ def cmd_poster_classify(
             counts[status] = counts.get(status, 0) + 1
         conn.commit()
     log.info("poster-classify done %s", counts)
-    return {"ok": True, "version": version, **counts}
+    return {"ok": True, "version": version, "room_ids": sorted(want) if want else None, **counts}

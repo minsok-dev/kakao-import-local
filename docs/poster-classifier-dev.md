@@ -180,11 +180,14 @@ poster_model_meta
 | `poster-classify` | C1 단독 / C2 연동 | photo_file(sha 있음) 판정 기록. 활성 모델 없으면 no-op + 로그 |
 | `poster-activate --version vN` | C3 (C1은 리포트만) | 고정 test 게이트 통과 시에만 `active-model.json` |
 | `poster-label --sha … --status poster\|non_poster` | C3 | human 확정 |
+| `poster-dataset-sync` | C3 자동화 | human `poster`/`non_poster` → `dataset/` 복사 (uncertain 제외) |
+| `poster-retrain-from-review` | C3 자동화 | sync + `poster-train` (+ 선택 `--activate` / `--activate-force`) |
 
 로그: `kakao_import.logging_util`. 쿼리·학습 장수·오제외 건수는 **반드시 logger**.
 
 `cmd_run`에 classify를 **넣지 않는다** (C2). collect/운영이 `run` 다음 명시 호출.  
-나중에 collect 훅은 C2 완료 후 `kakao-pc-collect`에서 `poster-classify` 한 줄 추가 (이 레포 계약 유지).
+`kakao-pc-collect`는 수집 성공 시 `poster-classify`를 체인에 포함함.  
+human→dataset→retrain: [schedule-auto-upload-and-poster-retrain-design.md](./schedule-auto-upload-and-poster-retrain-design.md) §3·§11.
 
 ---
 

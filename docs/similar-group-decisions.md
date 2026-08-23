@@ -70,8 +70,8 @@ similar_group G1 = { A, B, C }
 | UI | `similar-review` → **부분** → 멤버 **선택** → **선택 묶기** → **부분 저장** |
 | upload (4.2+) | 묶음마다 대표 1장 + 단독은 각자 (`upload_partial`) |
 
-**지금(4.1):** decision·서브그룹만 저장. 업로드 큐·파일 삭제·자동 병합 없음.  
-**주의:** `similar-detect` 재실행 시 그룹이 재구성되면 decision/서브그룹은 초기화될 수 있음(재리뷰).
+**지금(4.1+):** decision·서브그룹 저장. **Phase 4.2**부터 upload가 decision을 따름.  
+**주의:** `similar-detect` 재실행 시 그룹은 재구성되지만, **멤버 집합(fingerprint)이 동일한 non-deferred decision(+partial 서브그룹)은 복원**된다. 멤버가 바뀌면 새 그룹은 `deferred`로 남는다.
 
 실무 가이드:
 

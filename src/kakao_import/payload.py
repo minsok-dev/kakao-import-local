@@ -506,12 +506,20 @@ def collapse_grouped_photo_bundles(
     }
 
 
-def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[dict[str, Any]]:
+def build_upload_items(
+    settings: Settings,
+    *,
+    limit: int | None = None,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[dict[str, Any]]:
     """
     exact SHA 대표 사진 + text_merge(있으면) / group_text 기반 인접 메시지로 items 생성.
     excluded_from_upload=1 멤버는 제외.
     [변경사유]: 증분 — uploaded/hold 등은 caption SQL 재계산 스킵, 캐시 있으면 재사용
+    [변경사유]: room_ids 있으면 해당 방 rel 만. 활성 포스터 모델 있으면 미분류 sha 제외.
     """
+    from kakao_import.pipeline import normalize_room_ids, room_id_from_rel
+
     client_id = ensure_client_instance_id()
     items: list[dict[str, Any]] = []
     caption_plan = load_incremental_caption_plan(settings.db_path)
@@ -520,6 +528,16 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
     rebuilt = 0
     reused_cache = 0
     skipped_eval = 0
+    skipped_room = 0
+    skipped_unclassified = 0
+    want = normalize_room_ids(room_ids)
+    require_classify = False
+    try:
+        from kakao_import.poster_classify import load_active_model
+
+        require_classify = load_active_model() is not None
+    except Exception:  # noqa: BLE001
+        require_classify = False
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             """
@@ -545,7 +563,10 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             """
         ).fetchall()
 
-        from kakao_import.poster_schema import excluded_poster_shas
+        from kakao_import.poster_schema import (
+            excluded_poster_shas,
+            has_any_classify_for_sha,
+        )
 
         poster_skip = excluded_poster_shas(conn)
         if poster_skip:
@@ -559,12 +580,20 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
             if sha in poster_skip:
                 log.info("upload skip poster-classified sha=%s", sha[:12])
                 continue
+            rel_path = str(row["rel_path"] or "").replace("\\", "/")
+            if want and room_id_from_rel(rel_path) not in want:
+                skipped_room += 1
+                continue
+            # [변경사유]: 활성 모델 있을 때 classify 행 없으면 업로드 금지(미분류 hold)
+            if require_classify and not has_any_classify_for_sha(conn, sha):
+                skipped_unclassified += 1
+                log.info("upload skip unclassified sha=%s rel=%s", sha[:12], rel_path)
+                continue
             # [변경사유]: 이미 평가 완료(uploaded/hold/excluded)면 caption 재계산 생략
             if sha in skip_shas:
                 skipped_eval += 1
                 continue
             photo_id = int(row["photo_id"])
-            rel_path = str(row["rel_path"] or "").replace("\\", "/")
             # [변경사유]: 절대경로 금지 — photos/ 상대만
             if rel_path.startswith("/") or (len(rel_path) > 1 and rel_path[1] == ":"):
                 log.warning("skip absolute rel_path photo_id=%s", photo_id)
@@ -729,11 +758,14 @@ def build_upload_items(settings: Settings, *, limit: int | None = None) -> list[
         }
 
     log.info(
-        "build_upload_items count=%s skip_eval=%s cache=%s rebuilt=%s",
+        "build_upload_items count=%s skip_eval=%s cache=%s rebuilt=%s skip_room=%s skip_unclassified=%s rooms=%s",
         len(items),
         skipped_eval,
         reused_cache,
         rebuilt,
+        skipped_room,
+        skipped_unclassified,
+        sorted(want) if want else None,
     )
     return items
 
@@ -743,11 +775,12 @@ def build_batch_manifest(
     *,
     limit: int | None = None,
     room_key: str | None = None,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     """배치 매니페스트 (dry-run 출력용)."""
     client_id = ensure_client_instance_id()
     batch_id = str(uuid.uuid4())
-    items = build_upload_items(settings, limit=limit)
+    items = build_upload_items(settings, limit=limit, room_ids=room_ids)
     policy_info = getattr(build_upload_items, "_last_policy", {})  # type: ignore[attr-defined]
     requests: list[dict[str, Any]] = []
     for it in items:

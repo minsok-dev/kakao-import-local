@@ -439,6 +439,7 @@ def cmd_upload(
     result_json: Path | None = None,
     sleep_sec: float | None = None,
     ocr_extra_sec: float | None = None,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     """
     dry_run=True(기본): 매니페스트만 기록 + empty/file_missing 통계.
@@ -446,12 +447,13 @@ def cmd_upload(
     [변경사유]: 운영 — 포스터-only도 올려야 함. empty로 배치 전체 차단 금지.
     require_adjacent=True 일 때만 empty 있으면 전체 차단 (엄격 모드).
     [변경사유]: 실전송 시 장당 유휴(sleep) — 서비스 similar/OCR 부하 완화.
+    [변경사유]: room_ids 있으면 해당 방 후보만.
     """
     photos_root = root / "photos"
     pace_sleep, pace_ocr_extra = resolve_upload_pace_sec(
         sleep_sec=sleep_sec, ocr_extra_sec=ocr_extra_sec
     )
-    manifest = build_batch_manifest(settings, limit=limit)
+    manifest = build_batch_manifest(settings, limit=limit, room_ids=room_ids)
     out = out_manifest or (settings.db_path.parent / "last_upload_manifest.json")
     write_manifest(manifest, out)
     candidate_sync = sync_upload_candidates(

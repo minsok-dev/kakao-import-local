@@ -427,7 +427,9 @@ service token 완전 자동 전송, similar 자동 통합,
 계약 [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발 [poster-classifier-dev.md](./poster-classifier-dev.md).
 
 **PC 카톡 준자동 수집**(검색·Ctrl+S·서랍 50칸·좌표 3곳·Documents→photos)은 import와 **분리**한다.  
-계약: [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md). 하이브리드(UIA+최소 좌표). 끝나면 `run`+`similar-detect`만 호출하고 upload는 similar-review 후.
+계약: [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md). 하이브리드(UIA+최소 좌표).  
+끝나면 `run`+`poster-classify`+`similar-detect` 호출. upload는 **opt-in** (`KAKAO_COLLECT_RUN_UPLOAD`)으로 완료 직후 가능하며, similar deferred는 hold → `similar-review` 후 수동/다음 upload.  
+상세: [schedule-auto-upload-and-poster-retrain-design.md](./schedule-auto-upload-and-poster-retrain-design.md) §11.
 
 Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2E 후 **병렬 가능**.
 

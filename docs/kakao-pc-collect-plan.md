@@ -261,9 +261,10 @@ Explorer 수정 시각은 다운로드 시각 → 따라잡기 기준 아님. **
 | 대화 txt | ✅ Ctrl+S + Win32 저장창 |
 | 서랍·50칸·다운로드 | ✅ 키보드 + **좌표 3곳** (실패 시 중단) |
 | Documents → photos | ✅ |
-| `run` / `similar-detect` | 수집 성공 후 호출 |
-| similar-review | **사람** |
-| upload | 리뷰 후 |
+| `run` / `poster-classify` / `similar-detect` | 수집 성공 후 호출 (`KAKAO_COLLECT_RUN_IMPORT=1`) |
+| `upload --no-dry-run` | **opt-in** (`KAKAO_COLLECT_RUN_UPLOAD=1` / `--with-upload`). deferred는 hold |
+| similar-review | **사람** (스케줄에서 UI 금지) |
+| upload (수동) | 리뷰 후 hold분 재전송, 또는 위 opt-in 자동 |
 
 Phase 1.5 폴더 watcher는 이후. 지금은 A 종료 시 import 호출.
 

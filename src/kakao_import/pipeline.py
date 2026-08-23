@@ -41,6 +41,37 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 LEGACY_ROOM_ID = "_legacy"
 
 
+def normalize_room_ids(
+    room_ids: list[str] | tuple[str, ...] | set[str] | None,
+) -> set[str] | None:
+    """빈 값이면 None(=전체). 아니면 방 id 집합."""
+    # [변경사유]: --room E2E 필터 — collect/import 공통
+    if not room_ids:
+        return None
+    out = {str(x).strip() for x in room_ids if str(x).strip()}
+    return out or None
+
+
+def filter_room_layouts(
+    layouts: list[tuple[str, Path, Path]],
+    room_ids: set[str] | None,
+) -> list[tuple[str, Path, Path]]:
+    """room_ids 있으면 해당 방 레이아웃만."""
+    if not room_ids:
+        return layouts
+    filtered = [row for row in layouts if row[0] in room_ids]
+    missing = sorted(room_ids - {row[0] for row in filtered})
+    if missing:
+        log.warning("room filter missing layouts rooms=%s", missing)
+    log.info(
+        "room filter layouts keep=%s of=%s rooms=%s",
+        len(filtered),
+        len(layouts),
+        sorted(room_ids),
+    )
+    return filtered
+
+
 def room_id_from_rel(rel: str) -> str:
     """
     상대경로에서 방 id.
@@ -153,11 +184,17 @@ def cmd_init(settings: Settings, *, reset: bool = False) -> None:
     init_schema(settings.db_path, reset=reset)
 
 
-def cmd_scan(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """사진 파일 인덱스만 (SHA 전)."""
+def cmd_scan(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    """사진 파일 인덱스만 (SHA 전). room_ids 있으면 해당 방만."""
     root = root or settings.export_root
     assert root is not None
-    layouts = iter_room_layouts(root)
+    want = normalize_room_ids(room_ids)
+    layouts = filter_room_layouts(iter_room_layouts(root), want)
     with connect(settings.db_path) as conn:
         batch_id = start_batch(conn, root.name)
         n = 0
@@ -207,11 +244,17 @@ def cmd_scan(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         return summary
 
 
-def cmd_parse(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """채팅 TXT 파싱."""
+def cmd_parse(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    """채팅 TXT 파싱. room_ids 있으면 해당 방만."""
     root = root or settings.export_root
     assert root is not None
-    layouts = iter_room_layouts(root)
+    want = normalize_room_ids(room_ids)
+    layouts = filter_room_layouts(iter_room_layouts(root), want)
     with connect(settings.db_path) as conn:
         batch_id = start_batch(conn, root.name)
         rooms = 0
@@ -294,18 +337,73 @@ def cmd_parse(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         return summary
 
 
-def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """시각 매칭 + 그룹 + 설명."""
-    root = root or settings.export_root
-    assert root is not None
-    with connect(settings.db_path) as conn:
-        batch_id = start_batch(conn, root.name)
-        clear_batch_match_data(conn, batch_id)
-        # 이전 배치 잔여 정리: 최신 매칭만 유지 — 이전 batch image_group 삭제
+def _clear_match_data_for_rooms(
+    conn,
+    room_ids: set[str] | None,
+) -> None:
+    """
+    매칭 테이블 정리.
+    room_ids None → 전역 삭제(기존).
+    room_ids 있으면 해당 방 photo에 묶인 assignment/group 만 삭제 — 타 방 보존.
+    """
+    # [변경사유]: --room E2E 시 전역 DELETE 하면 타 방 매칭 유실(버그)
+    if not room_ids:
         conn.execute("DELETE FROM group_text")
         conn.execute("DELETE FROM photo_message_assignment")
         conn.execute("DELETE FROM image_group")
         conn.execute("DELETE FROM review_item")
+        return
+
+    photo_ids: list[int] = []
+    all_rows = conn.execute("SELECT id, rel_path FROM photo_file").fetchall()
+    for r in all_rows:
+        if room_id_from_rel(str(r["rel_path"] or "")) in room_ids:
+            photo_ids.append(int(r["id"]))
+
+    photo_ids = sorted(set(photo_ids))
+    if not photo_ids:
+        log.info("clear match room_ids=%s photos=0 — nothing to clear", sorted(room_ids))
+        return
+
+    placeholders = ",".join("?" for _ in photo_ids)
+    gid_rows = conn.execute(
+        f"""
+        SELECT DISTINCT group_id FROM photo_message_assignment
+        WHERE photo_id IN ({placeholders}) AND group_id IS NOT NULL
+        """,
+        tuple(photo_ids),
+    ).fetchall()
+    gids = [int(r["group_id"]) for r in gid_rows]
+    if gids:
+        gph = ",".join("?" for _ in gids)
+        conn.execute(f"DELETE FROM group_text WHERE group_id IN ({gph})", tuple(gids))
+        conn.execute(f"DELETE FROM image_group WHERE id IN ({gph})", tuple(gids))
+    conn.execute(
+        f"DELETE FROM photo_message_assignment WHERE photo_id IN ({placeholders})",
+        tuple(photo_ids),
+    )
+    log.info(
+        "clear match scoped rooms=%s photos=%s groups=%s",
+        sorted(room_ids),
+        len(photo_ids),
+        len(gids),
+    )
+
+
+def cmd_match(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    """시각 매칭 + 그룹 + 설명. room_ids 있으면 해당 방만 재매칭(타 방 유지)."""
+    root = root or settings.export_root
+    assert root is not None
+    want = normalize_room_ids(room_ids)
+    with connect(settings.db_path) as conn:
+        batch_id = start_batch(conn, root.name)
+        clear_batch_match_data(conn, batch_id)
+        _clear_match_data_for_rooms(conn, want)
 
         photos_rows = conn.execute(
             "SELECT id, rel_path, file_name, name_time, name_parse_ok FROM photo_file"
@@ -313,6 +411,9 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         photo_slots: list[PhotoSlot] = []
         for r in photos_rows:
             if not r["name_parse_ok"] or not r["name_time"]:
+                continue
+            rel = str(r["rel_path"] or "")
+            if want and room_id_from_rel(rel) not in want:
                 continue
             seq = parse_kakaotalk_filename(str(r["file_name"] or "")).sequence
             photo_slots.append(
@@ -334,6 +435,12 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
             """
         ).fetchall()
         messages = [dict(r) for r in msg_rows]
+        if want:
+            messages = [
+                m
+                for m in messages
+                if room_id_from_rel(str(m.get("chat_rel") or "")) in want
+            ]
 
         # [변경사유]: 방별로만 매칭 — 같은 분 다른 방 캡션 혼입 방지
         photos_by_room: dict[str, list[PhotoSlot]] = {}
@@ -347,6 +454,8 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
 
         result = MatchOutput()
         for rid in sorted(set(photos_by_room) | set(msgs_by_room)):
+            if want and rid not in want:
+                continue
             part = match_photos_to_messages(
                 photos=photos_by_room.get(rid, []),
                 messages=msgs_by_room.get(rid, []),
@@ -471,14 +580,26 @@ def cmd_match(settings: Settings, root: Path | None = None) -> dict[str, Any]:
         return summary
 
 
-def cmd_hash(settings: Settings, root: Path | None = None) -> dict[str, Any]:
+def cmd_hash(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
     """SHA-256 + exact 그룹. [변경사유]: Phase 3.5 — hash 전 file_missing prune."""
     root = root or settings.export_root
     assert root is not None
+    want = normalize_room_ids(room_ids)
     with connect(settings.db_path) as conn:
         # [변경사유]: 삭제된 로컬 파일이 exact 그룹에 남아 fail=N 누적되던 문제
         pruned = prune_missing_photo_files(conn, root)
         rows = conn.execute("SELECT id, rel_path, sha256 FROM photo_file").fetchall()
+        if want:
+            rows = [
+                r
+                for r in rows
+                if room_id_from_rel(str(r["rel_path"] or "")) in want
+            ]
         updated = 0
         for r in rows:
             path = root / r["rel_path"]
@@ -496,6 +617,7 @@ def cmd_hash(settings: Settings, root: Path | None = None) -> dict[str, Any]:
             "hashed": len(rows),
             "updated": updated,
             "pruned_missing": pruned.get("pruned", 0),
+            "room_ids": sorted(want) if want else None,
             **exact,
         }
 
@@ -814,17 +936,23 @@ def _esencia_check(conn) -> dict[str, Any]:
     }
 
 
-def cmd_run(settings: Settings, root: Path | None = None) -> dict[str, Any]:
-    """Phase1+2: scan→parse→match→hash→merge→report."""
+def cmd_run(
+    settings: Settings,
+    root: Path | None = None,
+    *,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    """Phase1+2: scan→parse→match→hash→merge→report. room_ids 있으면 해당 방만."""
     root = root or settings.export_root
     assert root is not None
     if not settings.db_path.exists():
         cmd_init(settings)
-    out: dict[str, Any] = {}
-    out["scan"] = cmd_scan(settings, root)
-    out["parse"] = cmd_parse(settings, root)
-    out["match"] = cmd_match(settings, root)
-    out["hash"] = cmd_hash(settings, root)
+    want = normalize_room_ids(room_ids)
+    out: dict[str, Any] = {"room_ids": sorted(want) if want else None}
+    out["scan"] = cmd_scan(settings, root, room_ids=want)
+    out["parse"] = cmd_parse(settings, root, room_ids=want)
+    out["match"] = cmd_match(settings, root, room_ids=want)
+    out["hash"] = cmd_hash(settings, root, room_ids=want)
     out["merge"] = cmd_merge(settings)
     out["report"] = build_report(settings, root)
     return out
@@ -838,8 +966,9 @@ def cmd_similar_detect(
     max_distance: int | None = None,
     limit: int | None = None,
     force_resign: bool = False,
+    room_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
-    """signature 계산 + similar 그룹 재구성. decision 기본 deferred."""
+    """signature 계산 + similar 그룹 재구성. decision 기본 deferred. room_ids 시 해당 방만."""
     from kakao_import.similar_detect import (
         ensure_similar_schema,
         rebuild_similar_groups,
@@ -849,6 +978,7 @@ def cmd_similar_detect(
 
     root = root or settings.export_root
     assert root is not None
+    want = normalize_room_ids(room_ids)
     dist = (
         max_distance
         if max_distance is not None
@@ -866,7 +996,9 @@ def cmd_similar_detect(
         sign_stats = upsert_photo_signatures(
             conn, root, sign_fn=sign_fn, limit=limit, force=force_resign
         )
-        group_stats = rebuild_similar_groups(conn, max_distance=dist)
+        group_stats = rebuild_similar_groups(
+            conn, max_distance=dist, room_ids=want
+        )
         conn.commit()
         log.info(
             "similar-detect signed=%s groups=%s members=%s skip_exact=%s dist=%s",

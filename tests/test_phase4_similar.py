@@ -534,3 +534,48 @@ def test_same_content_unions_member_captions(tmp_path: Path) -> None:
     assert "다음날 앨범 설명" in text
     assert ROOM_ADD_SEPARATOR in text
 
+
+def test_rebuild_preserves_same_content_decision(tmp_path: Path) -> None:
+    """[변경사유]: similar-detect 재실행 시 동일 멤버 집합의 non-deferred decision 유지."""
+    db = tmp_path / "preserve.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="sha-a")
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="sha-b")
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "sha-a")
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "sha-b")
+        stats1 = rebuild_similar_groups(conn, max_distance=10)
+        assert stats1["groups"] == 1
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn, group_id=gid, decision="same_content", representative_photo_id=p1
+        )
+        conn.commit()
+
+        stats2 = rebuild_similar_groups(conn, max_distance=10)
+        assert stats2["groups"] == 1
+        assert stats2.get("decisions_restored") == 1
+        g = list_similar_groups(conn)[0]
+        assert g["decision"] == "same_content"
+        assert g["representative_photo_id"] == p1
+        conn.commit()
+
+
+def test_rebuild_deferred_stays_deferred_after_rebuild(tmp_path: Path) -> None:
+    """deferred 그룹은 스냅샷하지 않고 재생성 후에도 deferred."""
+    db = tmp_path / "def.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        p1 = _insert_photo(conn, rel="photos/a.jpg", sha="sha-a")
+        p2 = _insert_photo(conn, rel="photos/b.jpg", sha="sha-b")
+        _insert_sig(conn, p1, "0000000000000000", "0000000000000000", "sha-a")
+        _insert_sig(conn, p2, "0000000000000001", "0000000000000000", "sha-b")
+        rebuild_similar_groups(conn, max_distance=10)
+        assert list_similar_groups(conn)[0]["decision"] == "deferred"
+        stats = rebuild_similar_groups(conn, max_distance=10)
+        assert stats.get("decisions_restored") == 0
+        assert list_similar_groups(conn)[0]["decision"] == "deferred"
+        conn.commit()
+

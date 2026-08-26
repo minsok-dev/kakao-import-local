@@ -181,7 +181,8 @@ def test_bundle_idempotency_stable() -> None:
 
 def test_max_members_truncate_overflow_stays_single() -> None:
     """상한 초과분은 드롭하지 않고 단건으로 남김 — 업로드 유실 방지."""
-    items = [_item(i, slot=i, group_id=7, seq=i) for i in range(0, 7)]
+    # [변경사유]: MAX_BUNDLE_MEMBERS=10 — 12장으로 truncate 검증
+    items = [_item(i, slot=i, group_id=7, seq=i) for i in range(0, 12)]
     r = collapse_grouped_photo_bundles(
         items, client_id="cid", max_members=MAX_BUNDLE_MEMBERS
     )
@@ -189,4 +190,4 @@ def test_max_members_truncate_overflow_stays_single() -> None:
     singles = [it for it in r["items"] if not it.get("sub_images")]
     assert len(bundled) == 1
     assert 1 + len(bundled[0]["sub_images"]) == MAX_BUNDLE_MEMBERS
-    assert len(singles) == 7 - MAX_BUNDLE_MEMBERS
+    assert len(singles) == 12 - MAX_BUNDLE_MEMBERS

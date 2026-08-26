@@ -57,7 +57,7 @@ KakaoTalk_YYYYMMDD_HHMMSSSSS_02.jpg
 1. similar 필터 **이후** 큐에 **같은 스템 멤버 ≥2**
 2. 채팅 `group_candidate.bundle_candidate` (`slot_count >= 2`)
 3. 동일 KakaoTalk 시각 스템 + sequence≥1 (`_01` 이상) 1장 이상
-4. 멤버 상한 `MAX_BUNDLE_MEMBERS` (현재 5) — 초과분은 단건 잔류
+4. 멤버 상한 `MAX_BUNDLE_MEMBERS` (현재 10) — 초과분은 단건 잔류
 
 ### 2.3 단건으로 쪼개지는 대표 원인
 
@@ -116,7 +116,7 @@ KakaoTalk_YYYYMMDD_HHMMSSSSS_02.jpg
 
 ### D. 상한·exact
 
-- `MAX_BUNDLE_MEMBERS` 상향 또는 초과분도 같은 콘텐츠 첨부(단건 분리 금지).
+- `MAX_BUNDLE_MEMBERS` 초과분도 같은 콘텐츠 첨부(단건 분리 금지) — **상한 자체는 2026-08-26에 10으로 상향됨**. 원자성(similar/non_poster)은 별도.
 - exact hit 시에도 sub를 기존 content에 붙일지 **서버 계약 변경** 검토.
 
 ### E. 이미 쪼개진 데이터

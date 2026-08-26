@@ -31,7 +31,7 @@
 - [x] main = 같은 스템에서 `sequence` 최소(본파일)의 `rel_path` / `sha256`
 - [x] 슬롯 3 · 같은 스템 파일 2(Y) → 멤버 2로 묶임, 단건으로 쪼개지지 않음 *(해당 케이스 관측·계약 유지)*
 - [x] 슬롯 ≥2 · 파일 1 → **단건** (묶음 아님) *(계약·단위 테스트)*
-- [x] 멤버 >5 → 5장만 묶음, 초과는 **단건 잔류** + 로그 truncate *(단위 테스트)*
+- [x] 멤버 >10 → 10장만 묶음, 초과는 **단건 잔류** + 로그 truncate *(단위 테스트)*
 - [x] similar `same_content` 비대표는 스킵되고, **남은** 채팅 그룹만 묶임(similar≠main+sub)
 - [x] `deferred` 그룹 있으면 기존처럼 upload 차단 *(리뷰에서 deferred↔same_content 전환 확인)*
 
@@ -62,6 +62,6 @@
 
 | 일자 | 환경 | 담당 | 결과 요약 |
 |------|------|------|-----------|
-| 2026-08-05~06 | 로컬→스테이징 Import | 운영 | dry-run·`--no-dry-run`·similar-detect/review·묶음·exact/SNS·캡션(multi_room) 진행. **현재까지 발견 오류 없음.** 미관측만: 멤버>5 truncate, 50MiB 거부 |
+| 2026-08-05~06 | 로컬→스테이징 Import | 운영 | dry-run·`--no-dry-run`·similar-detect/review·묶음·exact/SNS·캡션(multi_room) 진행. **현재까지 발견 오류 없음.** 미관측만: 멤버>10 truncate, 50MiB 거부 |
 
 관련: [similar-group-decisions.md](./similar-group-decisions.md) · [phase3-import.md](./phase3-import.md) · [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) §9

@@ -449,7 +449,7 @@ Legacy 백필·Similar enforce는 카카오 3.5와 **축이 다름** — 3.5·E2
 ## 8. 즉시 다음 액션
 
 1. **Exact SNS 병합 · F hold · DDL 015/016** — **상용 운영 중** (2026-08-09 운영자 확인). 문서 불일치 해소됨.
-2. **Phase 4.2+** 검증: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md) — **2026-08-06 현재까지 오류 없음** (미관측: 멤버>5·50MiB만)
+2. **Phase 4.2+** 검증: [phase42-bundle-verification-checklist.md](./phase42-bundle-verification-checklist.md) — **2026-08-06 현재까지 오류 없음** (미관측: 멤버>10·50MiB만)
 3. (병렬) Legacy 백필 · Similar enforce 운영 점검
 4. (후속·선택) Phase 1.5 watcher · Phase 5
 5. caption-only ledger · similar 서명 30MiB — **2026-08-09 구현**

@@ -34,8 +34,8 @@ log = get_logger(__name__)
 MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
 # [변경사유]: 예전 15MiB 하드 스킵 제거 확인용 (회귀 테스트)
 LEGACY_HARD_SKIP_BYTES = 15 * 1024 * 1024
-# [변경사유]: Phase 4.2+ — Nginx total body · 서버 maxFiles 와 맞춤 (main+4 sub)
-MAX_BUNDLE_MEMBERS = 5
+# [변경사유]: Phase 4.2+ — Nginx total body · 서버 maxFiles 와 맞춤. SNS·카카오 통일 10장 (기존 5)
+MAX_BUNDLE_MEMBERS = 10
 
 
 def exceeds_ingress_limit(byte_size: int) -> bool:

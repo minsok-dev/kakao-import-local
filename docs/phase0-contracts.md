@@ -124,7 +124,7 @@ decision: `same_content` / `different_content` / `partial` / `deferred` (upload 
   - 접미사 없는 단독 파일(다른 밀리초)은 채팅이 연속이어도 **단건**
   - similar `same_content` ≠ main+sub (similar는 대표 1장 유지)
   - 같은 스템 M≥2(M&lt;슬롯 N) → **있는 장만** 묶음 (Y)
-  - 멤버 상한 **5** (main+4 sub); exact 경로(SNS/hold)에서는 main만 처리·sub 미첨부
+  - 멤버 상한 **10** (main+sub); exact 경로(SNS/hold)에서는 main만 처리·sub 미첨부
   - payload: `item.sub_images: [{ sha256, rel_path }]` · multipart `file` + `sub_0`…
 
 ## 8. 로그

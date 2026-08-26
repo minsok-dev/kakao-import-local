@@ -134,7 +134,7 @@ decision 문자열과 upload action 문자열을 문서·로그에서 **섞어 �
 | 조건 | 스템 멤버 ≥2 **그리고** 한 장이라도 `_01` 이상(sequence≥1) |
 | 대표 | 같은 스템 안 `sequence` 최소(본파일=0), 동점이면 slot_index |
 | 불일치 Y | 같은 스템 M≥2 → 있는 장만 묶음; `_01` 없는 단독은 단건 |
-| 상한 | 멤버 5 (main+4 sub). 초과 스템 멤버는 드롭하지 않고 **단건으로 잔류** |
+| 상한 | 멤버 10 (main+sub). 초과 스템 멤버는 드롭하지 않고 **단건으로 잔류** |
 | payload | `item.sub_images[{sha256,rel_path}]` · multipart `file`+`sub_i` |
 | exact | main만 기존 C/D/E/F; 신규 OCR(`ocr_queued`)일 때만 sub 첨부 |
 

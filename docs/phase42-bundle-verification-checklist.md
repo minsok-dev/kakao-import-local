@@ -12,6 +12,11 @@
 
 제외(의도적 비범위): 묶음 풀기 UI · 메인 수동 지정 · exact 경로 sub 자동 부착 · similar→main+sub
 
+<!-- [변경사유]: 2026-08-26 — 앨범 원자 업로드는 미결정. 운영 관찰 후 별도 결정 -->
+> **보류(미결정):** PC 앨범을 similar/non_poster보다 우선해 **무조건 main+sub**로 올릴지 —  
+> [pc-album-atomic-upload-pending.md](./pc-album-atomic-upload-pending.md)  
+> (현황·대안만 기록. 코드·계약 변경 없음.)
+
 ---
 
 ## A. 로컬 dry-run

@@ -12,6 +12,9 @@
 
 서버측 짧은 안내: `frontend/docs/kakao-ingest-dedup-reject-plan.md`
 
+**SNS 거부 목록 (구현 완료, 2026-08-27):**
+`frontend/docs/sns-ingest-reject-list-plan.md` — 동일 `tbl_ingest_reject_sha`. 단건 스킵 / 부분 거부여도 묶음 전체 새 OCR / 관리 UI 거부 스킵·OCR 요청 버튼.
+
 ---
 
 ## 0. 문서 상태

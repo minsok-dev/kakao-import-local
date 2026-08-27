@@ -73,7 +73,12 @@ def _page_html() -> str:
   h1 { margin: 0; font-size: 1.25rem; letter-spacing: -0.02em; }
   .sub { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; }
   main { padding: 1rem 1.5rem 3rem; max-width: 1100px; margin: 0 auto; }
-  .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
+  .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; align-items: center; }
+  .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center; }
+  .filters select {
+    appearance: none; border: 1px solid var(--line); background: #fff;
+    border-radius: 8px; padding: 0.45rem 0.75rem; font: inherit;
+  }
   button, .btn {
     appearance: none; border: 1px solid var(--line); background: #fff;
     color: var(--ink); border-radius: 8px; padding: 0.45rem 0.75rem;
@@ -158,7 +163,19 @@ def _page_html() -> str:
     <button type="button" id="btn-reload">새로고침</button>
     <span class="meta" id="count"></span>
   </div>
-  <div class="note">Phase 4.1 · 썸네일=확대 · 「부분」=같은/다른 혼합 서브그룹 · upload 적용은 4.2+</div>
+  <!-- [변경사유]: Poster 분류 리뷰와 동일 — decision별 필터 (보류만 보기 등) -->
+  <div class="filters">
+    <label class="meta" for="decision-filter">decision</label>
+    <select id="decision-filter">
+      <option value="">모든 decision</option>
+      <option value="deferred" selected>보류</option>
+      <option value="same_content">같은 콘텐츠</option>
+      <option value="different_content">다른 콘텐츠</option>
+      <option value="partial">부분</option>
+    </select>
+    <button type="button" id="btn-apply" class="primary">필터 적용</button>
+  </div>
+  <div class="note">Phase 4.1 · 썸네일=확대 · 「부분」=같은/다른 혼합 서브그룹 · upload 적용은 4.2+ · 기본 필터=보류</div>
 </header>
 <main>
   <div id="list" class="empty">불러오는 중…</div>
@@ -187,26 +204,23 @@ const reps = {};
 const selected = {}; // gid -> Set(pid)
 const draftBundles = {}; // gid -> [{photo_ids, representative_photo_id}]
 let partialEditGid = null;
-let groupsCache = [];
+let groupsAll = [];   // API 전체
+let groupsCache = []; // 필터 적용 후 표시분
 let lb = { gid: null, index: 0, members: [] };
 
-async function load() {
-  const res = await fetch("/api/groups");
-  const groups = await res.json();
-  groupsCache = groups;
-  document.getElementById("count").textContent = "그룹 " + groups.length + "개";
-  const root = document.getElementById("list");
-  if (!groups.length) {
-    root.className = "empty";
-    root.textContent = "similar 그룹이 없습니다. 먼저 kakao-import similar-detect 를 실행하세요.";
-    return;
-  }
-  root.className = "";
-  root.innerHTML = groups.map(renderGroup).join("");
-  groups.forEach(g => {
+function decisionCounts(all) {
+  const c = { deferred: 0, same_content: 0, different_content: 0, partial: 0 };
+  (all || []).forEach(g => {
+    if (c[g.decision] != null) c[g.decision] += 1;
+  });
+  return c;
+}
+
+function syncGroupState(all) {
+  (all || []).forEach(g => {
     reps[g.group_id] = g.representative_photo_id;
-    selected[g.group_id] = new Set();
-    draftBundles[g.group_id] = [];
+    if (!selected[g.group_id]) selected[g.group_id] = new Set();
+    if (!draftBundles[g.group_id]) draftBundles[g.group_id] = [];
     if (g.decision === "partial" && g.subgroups) {
       draftBundles[g.group_id] = g.subgroups
         .filter(s => !s.is_singleton)
@@ -216,11 +230,53 @@ async function load() {
         }));
     }
   });
-  if (partialEditGid != null) {
-    const bar = document.getElementById("partial-bar-"+partialEditGid);
-    if (bar) bar.classList.add("open");
-    paintPartialThumbs(partialEditGid);
+}
+
+function applyFilter() {
+  const d = document.getElementById("decision-filter").value.trim();
+  const filtered = d
+    ? groupsAll.filter(g => g.decision === d)
+    : groupsAll.slice();
+  groupsCache = filtered;
+  const c = decisionCounts(groupsAll);
+  document.getElementById("count").textContent =
+    "표시 " + filtered.length + " / 전체 " + groupsAll.length +
+    " · 보류 " + c.deferred +
+    " · 같은 " + c.same_content +
+    " · 다른 " + c.different_content +
+    " · 부분 " + c.partial;
+  const root = document.getElementById("list");
+  if (!groupsAll.length) {
+    root.className = "empty";
+    root.textContent = "similar 그룹이 없습니다. 먼저 kakao-import similar-detect 를 실행하세요.";
+    return;
   }
+  if (!filtered.length) {
+    root.className = "empty";
+    root.textContent = d
+      ? "선택한 decision(" + (LABELS[d] || d) + ") 그룹이 없습니다. 필터를 바꿔 보세요."
+      : "표시할 그룹이 없습니다.";
+    return;
+  }
+  root.className = "";
+  root.innerHTML = filtered.map(renderGroup).join("");
+  if (partialEditGid != null) {
+    const still = filtered.some(g => g.group_id === partialEditGid);
+    if (!still) {
+      partialEditGid = null;
+    } else {
+      const bar = document.getElementById("partial-bar-"+partialEditGid);
+      if (bar) bar.classList.add("open");
+      paintPartialThumbs(partialEditGid);
+    }
+  }
+}
+
+async function load() {
+  const res = await fetch("/api/groups");
+  groupsAll = await res.json();
+  syncGroupState(groupsAll);
+  applyFilter();
 }
 
 function sgColor(key) {
@@ -330,7 +386,8 @@ function enterPartialEdit(gid) {
 }
 
 function openLightbox(gid, idx) {
-  const g = groupsCache.find(x => x.group_id === Number(gid));
+  const g = groupsAll.find(x => x.group_id === Number(gid))
+    || groupsCache.find(x => x.group_id === Number(gid));
   if (!g || !g.members.length) return;
   lb.gid = Number(gid);
   lb.members = g.members;
@@ -382,7 +439,7 @@ async function postDecide(body, gid) {
 }
 
 function applyDecideToUi(gid, out) {
-  const g = groupsCache.find(x => x.group_id === gid);
+  const g = groupsAll.find(x => x.group_id === gid);
   if (g) {
     g.decision = out.decision;
     g.upload_policy = out.upload_policy;
@@ -411,21 +468,16 @@ function applyDecideToUi(gid, out) {
       draftBundles[gid] = [];
     }
   }
-  const section = document.getElementById("g-"+gid);
-  if (!section) return;
-  // 메타·버튼·배지 갱신을 위해 해당 그룹만 재렌더(이미지는 캐시)
-  if (g) {
-    const html = renderGroup(g);
-    section.outerHTML = html;
-    if (out.decision === "partial") {
-      partialEditGid = null;
-      const bar = document.getElementById("partial-bar-"+gid);
-      if (bar) bar.classList.remove("open");
-    }
+  // [변경사유]: decision 변경 후 필터 재적용 — 보류 필터면 확정 그룹은 목록에서 사라짐
+  if (out.decision === "partial") {
+    partialEditGid = null;
   }
+  applyFilter();
 }
 
 document.getElementById("btn-reload").onclick = () => { partialEditGid = null; load(); };
+document.getElementById("btn-apply").onclick = () => applyFilter();
+document.getElementById("decision-filter").onchange = () => applyFilter();
 document.getElementById("lb-close").onclick = closeLightbox;
 document.getElementById("lb-prev").onclick = () => lbStep(-1);
 document.getElementById("lb-next").onclick = () => lbStep(1);

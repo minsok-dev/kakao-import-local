@@ -38,6 +38,12 @@ def test_page_html_mentions_decision_only() -> None:
     assert "data-open-lb" in html
     assert "data-save-partial" in html
     assert "선택 묶기" in html
+    # [변경사유]: Poster 분류 리뷰와 동일 — decision 필터
+    assert 'id="decision-filter"' in html
+    assert 'value="deferred"' in html
+    assert 'value="same_content"' in html
+    assert "applyFilter" in html
+    assert "groupsAll" in html
 
 
 def test_review_api_decide(tmp_path: Path) -> None:

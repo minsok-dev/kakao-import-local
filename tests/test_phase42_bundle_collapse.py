@@ -146,14 +146,44 @@ def test_no_collapse_single_member() -> None:
 
 
 def test_no_collapse_without_bundle_candidate() -> None:
-    """similar-only / 단건 매칭 — 묶지 않음."""
+    """
+    [변경사유]: A+B — bundle_candidate 없어도 동일 stem+_01 이면 묶음.
+    """
     items = [
         _item(1, slot=0, slot_count=1, bundle=False, seq=0),
         _item(2, slot=1, slot_count=1, bundle=False, seq=1),
     ]
     r = collapse_grouped_photo_bundles(items, client_id="cid")
-    assert len(r["items"]) == 2
-    assert r["bundle_collapsed_count"] == 0
+    assert len(r["items"]) == 1
+    assert r["bundle_collapsed_count"] == 1
+    assert len(r["items"][0]["sub_images"]) == 1
+
+
+def test_collapse_promotes_best_caption() -> None:
+    """멤버 중 한 장만 캡션이 있어도 main 에 승격."""
+    empty = _item(1, slot=0, seq=0)
+    empty["matched_messages"] = []
+    rich = _item(2, slot=1, seq=1)
+    rich["matched_messages"] = [
+        {"sent_at": "", "text": "DJ Lui Bachata", "message_fingerprint": "x"}
+    ]
+    r = collapse_grouped_photo_bundles([empty, rich], client_id="cid")
+    assert len(r["items"]) == 1
+    msgs = r["items"][0]["matched_messages"]
+    assert len(msgs) == 1
+    assert "DJ Lui" in msgs[0]["text"]
+
+
+def test_collapse_without_group_candidate_meta() -> None:
+    """group_candidate 메타가 없어도 파일명 stem 만으로 묶음."""
+    items = []
+    for seq, pid in ((0, 10), (1, 11), (2, 12)):
+        it = _item(pid, seq=seq)
+        it["_meta"].pop("group_candidate", None)
+        items.append(it)
+    r = collapse_grouped_photo_bundles(items, client_id="cid")
+    assert len(r["items"]) == 1
+    assert r["bundle_collapsed_count"] == 2
 
 
 def test_no_collapse_non_kakao_filenames() -> None:

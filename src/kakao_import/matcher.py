@@ -1,14 +1,17 @@
 # [변경사유]: Phase1 — 시각·개수·순서 matcher + image group + 후속 텍스트
 # [변경사유]: 선행 텍스트(≤2분) 귀속 + 슬롯/파일 수 불일치 시 부분 매칭·동일 group_text
 # [변경사유]: multi_room 같은 분 — 배정 유지 + 전 방 캡션 union (포기하지 않음)
+# [변경사유]: PC 앨범 원자 — 슬롯 시각 윈도우 후보 + 동일 stem 형제에 group_text 공유
 """사진↔메시지 매칭."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from kakao_import.photo_name import kakao_album_stem_and_seq
 from kakao_import.timeutil import minute_key, parse_iso
 
 
@@ -108,6 +111,107 @@ def _photo_message_slots(messages: list[dict[str, Any]]) -> list[tuple[dict[str,
     return groups
 
 
+def _candidate_photos_for_slots(
+    slots: list[MsgSlot],
+    photos_ok: list[PhotoSlot],
+    assigned_photos: set[int],
+    tolerance_seconds: int,
+) -> list[PhotoSlot]:
+    """
+    연속 사진 슬롯 전체에 대한 파일 후보.
+    [변경사유]: 첫 슬롯 분만 쓰지 않고, 슬롯 시각 구간±tolerance 안의 미배정 파일을 모은다.
+    (사진 + 사진 N장이 분 경계를 넘는 경우 빈 캡션·부분 배정 방지)
+    """
+    if not slots:
+        return []
+    t0 = min(s.abs_time for s in slots)
+    t1 = max(s.abs_time for s in slots)
+    window = timedelta(seconds=max(0, int(tolerance_seconds)))
+    lo = t0 - window
+    hi = t1 + window
+    found: list[PhotoSlot] = []
+    for p in photos_ok:
+        if p.photo_id in assigned_photos:
+            continue
+        if p.name_time is None:
+            continue
+        if lo <= p.name_time <= hi:
+            found.append(p)
+    found.sort(key=lambda x: (x.name_time, x.name_seq, x.photo_id))
+    return found
+
+
+def _attach_album_stem_siblings(
+    out: MatchOutput,
+    *,
+    photos_ok: list[PhotoSlot],
+    assigned_photos: set[int],
+) -> None:
+    """
+    이미 배정된 PC 앨범 멤버와 동일 stem 미배정 형제를 같은 group_key 에 붙인다.
+    [변경사유]: 시각 윈도우에 안 걸린 `_01`… 도 group_text 를 공유하게 함.
+    """
+    by_stem: dict[str, list[PhotoSlot]] = {}
+    for p in photos_ok:
+        stem, _seq = kakao_album_stem_and_seq(Path(p.rel_path).name)
+        if not stem:
+            continue
+        by_stem.setdefault(stem, []).append(p)
+
+    # group_key → 대표 Assignment (이미 배정된 것)
+    assigned_by_stem: dict[str, Assignment] = {}
+    for a in out.assignments:
+        if a.confidence == "unmatched" or not a.group_key:
+            continue
+        # photo_id → stem
+        for p in photos_ok:
+            if p.photo_id != a.photo_id:
+                continue
+            stem, _ = kakao_album_stem_and_seq(Path(p.rel_path).name)
+            if stem and stem not in assigned_by_stem:
+                assigned_by_stem[stem] = a
+            break
+
+    for stem, members in by_stem.items():
+        primary = assigned_by_stem.get(stem)
+        if primary is None:
+            continue
+        # 동일 stem 에 `_01` 이상이 있어야 앨범
+        if max(int(m.name_seq or 0) for m in members) < 1:
+            continue
+        next_slot = max(
+            (a.slot_index for a in out.assignments if a.group_key == primary.group_key),
+            default=primary.slot_index,
+        )
+        for p in sorted(members, key=lambda x: (x.name_seq, x.photo_id)):
+            if p.photo_id in assigned_photos:
+                continue
+            next_slot += 1
+            assigned_photos.add(p.photo_id)
+            out.assignments.append(
+                Assignment(
+                    photo_id=p.photo_id,
+                    message_id=primary.message_id,
+                    chat_id=primary.chat_id,
+                    slot_index=next_slot,
+                    confidence="medium",
+                    match_reason="album_stem_sibling",
+                    review_required=True,
+                    group_key=primary.group_key,
+                )
+            )
+            out.reviews.append(
+                {
+                    "kind": "album_stem_sibling",
+                    "photo_id": p.photo_id,
+                    "rel_path": p.rel_path,
+                    "group_key": primary.group_key,
+                    "stem": stem,
+                    "reason": "album_stem_sibling",
+                }
+            )
+
+
 def match_photos_to_messages(
     *,
     photos: list[PhotoSlot],
@@ -160,12 +264,16 @@ def match_photos_to_messages(
             group_idx += 1
             group_key = f"c{cid}_g{group_idx}_s{slots[0].seq}"
             mk = minute_key(slots[0].abs_time)
-            rooms = room_minutes.get(mk, set())
+            # [변경사유]: multi_room 감지는 슬롯이 걸친 모든 분 합집합
+            rooms: set[int] = set()
+            for sl in slots:
+                rooms |= room_minutes.get(minute_key(sl.abs_time), set())
             multi_room = len(rooms) > 1
 
-            candidates = list(photos_by_minute.get(mk, []))
-            # 미배정만
-            candidates = [p for p in candidates if p.photo_id not in assigned_photos]
+            # [변경사유]: 첫 슬롯 분 버킷만 쓰지 않음 — 슬롯 구간±tolerance
+            candidates = _candidate_photos_for_slots(
+                slots, photos_ok, assigned_photos, tolerance_seconds
+            )
 
             confidence = "ambiguous"
             reason = ""
@@ -316,6 +424,11 @@ def match_photos_to_messages(
                         "candidates": [p.rel_path for p in candidates[:20]],
                     }
                 )
+
+    # [변경사유]: 시각 매칭 후 — 동일 PC 앨범 stem 미배정 형제를 같은 group_text 로 공유
+    _attach_album_stem_siblings(
+        out, photos_ok=photos_ok, assigned_photos=assigned_photos
+    )
 
     # unmatched photos
     for p in photos_ok:

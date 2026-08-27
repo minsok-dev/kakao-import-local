@@ -2,6 +2,7 @@
 # [변경사유]: Phase 4.2+ — similar 이후 채팅 매칭 묶음을 main+sub_images 1 request로 붕괴
 # [변경사유]: 실제 붕괴는 KakaoTalk `_01` 동일 시각 스템만 — 연속 단독 사진 제외
 # [변경사유]: same_content/partial 멤버 캡션 union + 단톡방 헤더·채팅분리 구분선
+# [변경사유]: A+B — album stem 을 similar 앞에 붕괴, bundle_candidate 불필요, 캡션은 main 에 1회
 """서버 Import용 payload 빌더."""
 
 from __future__ import annotations
@@ -244,15 +245,64 @@ def _apply_similar_policy(
     items: list[dict[str, Any]],
     similar_map: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    """similar decision 기준으로 업로드 후보 필터."""
+    """
+    similar decision 기준으로 업로드 후보 필터.
+    [변경사유]: A — 앨범 묶음(main+sub)은 멤버 photo_id 전원 기준으로 deferred/same 판정.
+    """
     kept: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     deferred_groups: dict[int, dict[str, Any]] = {}
 
     for item in items:
         meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
-        pid = int(meta.get("photo_id") or 0)
-        sim = similar_map.get(pid)
+        member_pids = _item_member_photo_ids(item)
+        main_pid = int(meta.get("photo_id") or 0)
+
+        # 멤버 중 deferred 가 하나라도 있으면 묶음 전체 hold
+        deferred_sim: dict[str, Any] | None = None
+        for pid in member_pids:
+            sim = similar_map.get(pid)
+            if sim and str(sim.get("decision") or "") == "deferred":
+                deferred_sim = sim
+                break
+        if deferred_sim is not None:
+            reason = "similar_deferred"
+            gid = int(deferred_sim["group_id"])
+            deferred_groups.setdefault(
+                gid,
+                {
+                    "group_id": gid,
+                    "group_key": deferred_sim["group_key"],
+                    "decision": "deferred",
+                    "upload_policy": deferred_sim["upload_policy"],
+                    "representative_photo_id": deferred_sim["representative_photo_id"],
+                    "member_count": deferred_sim["member_count"],
+                },
+            )
+            skipped.append(
+                {
+                    "photo_id": main_pid,
+                    "rel": item.get("rel_path"),
+                    "local_item_id": item.get("local_item_id"),
+                    "decision": "deferred",
+                    "upload_policy": deferred_sim["upload_policy"],
+                    "group_id": deferred_sim["group_id"],
+                    "group_key": deferred_sim["group_key"],
+                    "reason": reason,
+                    "representative_photo_id": deferred_sim["representative_photo_id"],
+                    "subgroup_key": deferred_sim.get("subgroup_key"),
+                    "bundle_member_photo_ids": member_pids,
+                }
+            )
+            continue
+
+        sim = similar_map.get(main_pid)
+        if not sim:
+            # main 에 없어도 멤버 중 same_content/partial 메타가 있으면 대표 규칙 적용
+            for pid in member_pids:
+                if similar_map.get(pid):
+                    sim = similar_map[pid]
+                    break
         if not sim:
             kept.append(item)
             continue
@@ -260,22 +310,10 @@ def _apply_similar_policy(
         decision = str(sim["decision"])
         policy = str(sim["upload_policy"])
         reason: str | None = None
-        if decision == "deferred":
-            reason = "similar_deferred"
-            gid = int(sim["group_id"])
-            deferred_groups.setdefault(
-                gid,
-                {
-                    "group_id": gid,
-                    "group_key": sim["group_key"],
-                    "decision": decision,
-                    "upload_policy": policy,
-                    "representative_photo_id": sim["representative_photo_id"],
-                    "member_count": sim["member_count"],
-                },
-            )
-        elif decision == "same_content":
-            if pid != int(sim["representative_photo_id"] or 0):
+        if decision == "same_content":
+            rep = int(sim["representative_photo_id"] or 0)
+            # [변경사유]: 앨범 묶음이면 멤버 중 대표가 있으면 keep (stem 쪼개기 금지)
+            if rep not in set(member_pids):
                 reason = "similar_non_representative"
         elif decision == "partial":
             subgroup_key = str(sim.get("subgroup_key") or "")
@@ -284,13 +322,18 @@ def _apply_similar_policy(
                 reason = None
             elif subgroup_size >= 2 and bool(sim.get("is_subgroup_rep")):
                 reason = None
+            elif any(
+                bool((similar_map.get(pid) or {}).get("is_subgroup_rep"))
+                for pid in member_pids
+            ):
+                reason = None
             else:
                 reason = "similar_partial_non_representative"
 
         if reason:
             skipped.append(
                 {
-                    "photo_id": pid,
+                    "photo_id": main_pid,
                     "rel": item.get("rel_path"),
                     "local_item_id": item.get("local_item_id"),
                     "decision": decision,
@@ -300,6 +343,7 @@ def _apply_similar_policy(
                     "reason": reason,
                     "representative_photo_id": sim["representative_photo_id"],
                     "subgroup_key": sim.get("subgroup_key"),
+                    "bundle_member_photo_ids": member_pids,
                 }
             )
             continue
@@ -327,6 +371,52 @@ def _item_file_name(item: dict[str, Any]) -> str:
 def _item_album_stem_seq(item: dict[str, Any]) -> tuple[str | None, int]:
     """KakaoTalk 앨범 스템·sequence. 파싱 실패면 묶음 불가."""
     return kakao_album_stem_and_seq(_item_file_name(item))
+
+
+def _item_member_photo_ids(item: dict[str, Any]) -> list[int]:
+    """단건이면 photo_id 1개, 묶음이면 bundle.member_photo_ids."""
+    meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
+    bundle = meta.get("bundle") if isinstance(meta.get("bundle"), dict) else {}
+    raw = bundle.get("member_photo_ids")
+    if isinstance(raw, list) and raw:
+        out = [int(x) for x in raw if int(x or 0) > 0]
+        if out:
+            return out
+    pid = int(meta.get("photo_id") or 0)
+    return [pid] if pid > 0 else []
+
+
+def _matched_caption_chars(item: dict[str, Any]) -> int:
+    """matched_messages 본문 길이 합 — 묶음 시 가장 긴 캡션을 main 에 승격."""
+    msgs = item.get("matched_messages")
+    if not isinstance(msgs, list):
+        return 0
+    total = 0
+    for m in msgs:
+        if isinstance(m, dict):
+            total += len(str(m.get("text") or ""))
+    return total
+
+
+def _promote_best_caption_to_main(ordered: list[dict[str, Any]]) -> None:
+    """
+    앨범 멤버 중 캡션이 가장 긴 것을 main(ordered[0]) 에 복사.
+    [변경사유]: 일부만 group_text 가 있어도 묶음 OCR 본문은 비지 않게.
+    """
+    if not ordered:
+        return
+    best = max(ordered, key=_matched_caption_chars)
+    if _matched_caption_chars(best) <= 0:
+        return
+    main = ordered[0]
+    if best is main:
+        return
+    main["matched_messages"] = [
+        dict(m) for m in (best.get("matched_messages") or []) if isinstance(m, dict)
+    ]
+    hints = main.get("match_hints")
+    if isinstance(hints, dict):
+        hints["text_relation"] = "album_stem_caption"
 
 
 def _is_filename_album_set(members: list[dict[str, Any]]) -> bool:
@@ -364,6 +454,8 @@ def _attach_bundle_to_main(
     album_stem: str,
 ) -> dict[str, Any]:
     """ordered[0]=main, 나머지 sub_images. bundled_groups 한 행도 반환."""
+    # [변경사유]: 묶음 캡션은 main 에 1회 — 멤버 중 최장 본문 승격
+    _promote_best_caption_to_main(ordered)
     main = ordered[0]
     subs = ordered[1:]
     main_meta = main.get("_meta") if isinstance(main.get("_meta"), dict) else {}
@@ -432,71 +524,57 @@ def collapse_grouped_photo_bundles(
     max_members: int = MAX_BUNDLE_MEMBERS,
 ) -> dict[str, Any]:
     """
-    similar policy 이후 — 같은 채팅 group_id 안에서도
-    KakaoTalk `_01`/`_02` 동일 시각 스템만 1 request(main+sub)로 붕괴.
-    [변경사유]: Phase 4.2+ C+Y — similar는 이미 필터됨.
+    동일 KakaoTalk `_01`/`_02` 시각 스템을 1 request(main+sub)로 붕괴.
+    [변경사유]: A+B — bundle_candidate/채팅 group_id 없이도 stem 만으로 묶음.
+      similar 적용 **전**에 호출해 앨범이 단건으로 쪼개지지 않게 함.
     [변경사유]: 연속 단독 사진(접미사 없음·다른 밀리초)은 단건 유지 — 오묶음 방지.
     """
-    singles: list[dict[str, Any]] = []
-    by_group: dict[int, list[dict[str, Any]]] = {}
+    by_stem: dict[str, list[dict[str, Any]]] = {}
+    no_stem: list[dict[str, Any]] = []
 
     for item in items:
-        meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
-        gc = meta.get("group_candidate") if isinstance(meta.get("group_candidate"), dict) else None
-        if not gc or not gc.get("bundle_candidate"):
-            singles.append(item)
-            continue
-        gid = int(gc.get("group_id") or 0)
-        if gid <= 0:
-            singles.append(item)
-            continue
-        by_group.setdefault(gid, []).append(item)
+        stem, _seq = _item_album_stem_seq(item)
+        if stem:
+            by_stem.setdefault(stem, []).append(item)
+        else:
+            no_stem.append(item)
 
-    out: list[dict[str, Any]] = list(singles)
+    out: list[dict[str, Any]] = list(no_stem)
     bundled_groups: list[dict[str, Any]] = []
     collapsed = 0
 
-    for gid, members in sorted(by_group.items(), key=lambda x: x[0]):
-        by_stem: dict[str | None, list[dict[str, Any]]] = {}
-        for it in members:
-            stem, _seq = _item_album_stem_seq(it)
-            by_stem.setdefault(stem, []).append(it)
+    for stem, stem_members in sorted(by_stem.items(), key=lambda x: x[0]):
+        if not _is_filename_album_set(stem_members):
+            out.extend(stem_members)
+            continue
 
+        ordered = sorted(stem_members, key=_album_order_key)
         leftovers: list[dict[str, Any]] = []
-        for stem, stem_members in sorted(
-            by_stem.items(), key=lambda x: x[0] or ""
-        ):
-            if stem is None or not _is_filename_album_set(stem_members):
-                leftovers.extend(stem_members)
-                continue
-
-            ordered = sorted(stem_members, key=_album_order_key)
-            if len(ordered) > max_members:
-                log.warning(
-                    "bundle truncate group_id=%s stem=%s kept=%s dropped=%s max=%s",
-                    gid,
-                    stem,
-                    max_members,
-                    len(ordered) - max_members,
-                    max_members,
-                )
-                leftovers.extend(ordered[max_members:])
-                ordered = ordered[:max_members]
-            row = _attach_bundle_to_main(
-                ordered, client_id=client_id, gid=gid, album_stem=stem
+        if len(ordered) > max_members:
+            log.warning(
+                "bundle truncate stem=%s kept=%s dropped=%s max=%s",
+                stem,
+                max_members,
+                len(ordered) - max_members,
+                max_members,
             )
-            out.append(ordered[0])
-            collapsed += len(ordered) - 1
-            bundled_groups.append(row)
+            leftovers.extend(ordered[max_members:])
+            ordered = ordered[:max_members]
 
+        meta0 = ordered[0].get("_meta") if isinstance(ordered[0].get("_meta"), dict) else {}
+        gc0 = (
+            meta0.get("group_candidate")
+            if isinstance(meta0.get("group_candidate"), dict)
+            else {}
+        )
+        gid = int(gc0.get("group_id") or 0)
+        row = _attach_bundle_to_main(
+            ordered, client_id=client_id, gid=gid, album_stem=stem
+        )
+        out.append(ordered[0])
+        collapsed += len(ordered) - 1
+        bundled_groups.append(row)
         if leftovers:
-            # [변경사유]: 같은 채팅 그룹이어도 `_01` 스템이 아니면 단건 유지
-            if len(members) >= 2:
-                log.info(
-                    "bundle skip non-album group_id=%s leftover=%s",
-                    gid,
-                    len(leftovers),
-                )
             out.extend(leftovers)
 
     return {
@@ -684,6 +762,9 @@ def build_upload_items(
                 meta["similar"] = similar_map[pid]
             if pid in grouped_map:
                 meta["group_candidate"] = grouped_map[pid]
+        # [변경사유]: A+B — album stem 붕괴를 similar 앞에 두어 단건 쪼개짐·빈 캡션 방지
+        bundle_result = collapse_grouped_photo_bundles(items, client_id=client_id)
+        items = bundle_result["items"]
         policy_result = _apply_similar_policy(items, similar_map)
         items = policy_result["items"]
         # [변경사유]: same_content/partial 묶음 — 스킵 멤버 설명을 대표 본문에 union
@@ -717,9 +798,6 @@ def build_upload_items(
                 len(member_ids),
                 len(unioned),
             )
-        # [변경사유]: Phase 4.2+ — similar 필터 후 채팅 묶음 붕괴 (limit 전에 적용)
-        bundle_result = collapse_grouped_photo_bundles(items, client_id=client_id)
-        items = bundle_result["items"]
         # [변경사유]: union·묶음 이후 최종 캡션으로 멱등키 재계산
         for it in items:
             assign_item_idempotency(it)
@@ -746,6 +824,7 @@ def build_upload_items(
                 if ((it.get("_meta") or {}).get("group_candidate") or {}).get(
                     "bundle_candidate"
                 )
+                or (it.get("_meta") or {}).get("bundle")
             ],
             "bundled_groups": bundle_result["bundled_groups"],
             "bundle_collapsed_count": bundle_result["bundle_collapsed_count"],

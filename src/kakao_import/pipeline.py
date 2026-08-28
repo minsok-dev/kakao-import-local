@@ -29,7 +29,11 @@ from kakao_import.db import (
 )
 from kakao_import.hashutil import sha256_file
 from kakao_import.logging_util import get_logger
-from kakao_import.upload_state import hold_report, mark_candidates_needs_rebuild_by_similar_group
+from kakao_import.upload_state import (
+    hold_report,
+    mark_candidates_needs_rebuild_by_similar_group,
+    mark_hold_candidates_caption_stale,
+)
 from kakao_import.matcher import MatchOutput, PhotoSlot, match_photos_to_messages
 from kakao_import.merge_ops import decide_text_merge, undo_text_merge
 from kakao_import.parser import parse_chat_file
@@ -523,6 +527,8 @@ def cmd_match(
                 different_sender_grace_seconds=settings.different_sender_grace_seconds,
                 different_sender_max_chars=settings.different_sender_max_chars,
                 group_text_before_max_seconds=settings.group_text_before_max_seconds,
+                # [변경사유]: 발신자 변경·간격 초과 시 사진 그룹 분리
+                slot_merge_max_gap_minutes=settings.slot_merge_max_gap_minutes,
             )
             log.info(
                 "match room=%s photos=%s messages=%s groups=%s",
@@ -636,7 +642,12 @@ def cmd_match(
         )
         finish_batch(conn, batch_id, summary)
         conn.commit()
-        return summary
+    # [변경사유]: 재매칭으로 group_text 가 바뀌므로 보류 후보 캡션 캐시를 무효화
+    #   (state 는 유지 → similar/poster 보류는 그대로 남는다)
+    summary["hold_caption_stale"] = mark_hold_candidates_caption_stale(
+        settings.db_path, reason="rematch"
+    )
+    return summary
 
 
 def cmd_hash(

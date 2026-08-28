@@ -130,6 +130,40 @@ def mark_candidates_needs_rebuild_by_similar_group(
     return updated
 
 
+def mark_hold_candidates_caption_stale(db_path: Path, *, reason: str) -> int:
+    """
+    보류(hold) 후보의 캡션만 다음 실행에서 다시 조립하게 표시.
+
+    [변경사유]: 재매칭으로 group_text 가 바뀌어도 hold 상태 sha 는 skip_shas 에 걸려
+      옛 캡션이 그대로 남던 문제. state 는 건드리지 않으므로 보류가 풀리지 않는다.
+      (uploaded 는 제외 — 재업로드 유발 금지)
+    """
+    if not db_path.is_file():
+        return 0
+    placeholders = ",".join("?" for _ in HOLD_STATES)
+    with connect(db_path) as conn:
+        if not _candidate_tables_exist(conn):
+            return 0
+        cur = conn.execute(
+            f"""
+            UPDATE upload_candidate
+            SET needs_rebuild = 1,
+                updated_at = datetime('now')
+            WHERE state IN ({placeholders})
+              AND IFNULL(needs_rebuild, 0) = 0
+            """,
+            tuple(HOLD_STATES),
+        )
+        conn.commit()
+        updated = int(cur.rowcount or 0)
+    log.info(
+        "upload-state mark hold caption stale updated=%s reason=%s",
+        updated,
+        reason,
+    )
+    return updated
+
+
 def hold_report(db_path: Path) -> dict[str, Any]:
     """현재 hold / retry / failed 상태 요약."""
     out: dict[str, Any] = {

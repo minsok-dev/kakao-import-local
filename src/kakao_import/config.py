@@ -31,6 +31,10 @@ class Settings:
     similar_max_distance: int = 10
     # [변경사유]: 사진 앞 설명 귀속 창(초). 운영 합의 2분 이내
     group_text_before_max_seconds: int = 120
+    # [변경사유]: 연속 사진 메시지 슬롯 병합 상한(분).
+    #   다른 사람이 시간차를 두고 올린 사진이 한 그룹으로 묶여 첫 발신자 캡션을
+    #   공유하던 문제 방지. 0 이면 간격 제한 없음(이전 동작).
+    slot_merge_max_gap_minutes: int = 2
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -65,5 +69,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         similar_max_distance=similar_max,
         group_text_before_max_seconds=int(
             os.getenv("GROUP_TEXT_BEFORE_MAX_SECONDS") or "120"
+        ),
+        # [변경사유]: 연속 사진 병합 간격 상한 — 기본 2분
+        slot_merge_max_gap_minutes=int(
+            os.getenv("SLOT_MERGE_MAX_GAP_MINUTES") or "2"
         ),
     )

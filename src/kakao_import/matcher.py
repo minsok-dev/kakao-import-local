@@ -70,10 +70,19 @@ class MatchOutput:
     reviews: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _photo_message_slots(messages: list[dict[str, Any]]) -> list[tuple[dict[str, Any], list[MsgSlot]]]:
+def _photo_message_slots(
+    messages: list[dict[str, Any]],
+    *,
+    merge_max_gap: timedelta | None = None,
+) -> list[tuple[dict[str, Any], list[MsgSlot]]]:
     """
     연속 사진 메시지를 그룹 후보로 묶고 슬롯 전개.
     반환: (anchor_msg, slots[])
+
+    [변경사유]: 발신자가 바뀌거나 직전 사진과 `merge_max_gap` 초과로 벌어지면 그룹을
+      끊는다. 서로 다른 사람이 시간차로 올린 사진이 한 그룹이 되어 첫 발신자의
+      group_text 만 공유하고 뒤 발신자 본문은 통째로 버려지던 문제 방지.
+      merge_max_gap=None 이면 이전과 동일하게 간격 제한 없음.
     """
     groups: list[tuple[dict[str, Any], list[MsgSlot]]] = []
     i = 0
@@ -85,6 +94,8 @@ def _photo_message_slots(messages: list[dict[str, Any]]) -> list[tuple[dict[str,
             continue
         slots: list[MsgSlot] = []
         anchor = m
+        anchor_sender = m.get("sender")
+        prev_at: datetime | None = None
         j = i
         while (
             j < n
@@ -95,6 +106,18 @@ def _photo_message_slots(messages: list[dict[str, Any]]) -> list[tuple[dict[str,
             count = int(mj.get("photo_count") or 1)
             at = parse_iso(mj["abs_time"]) if isinstance(mj["abs_time"], str) else mj["abs_time"]
             assert at is not None
+            # [변경사유]: 발신자 변경 → 그룹 경계 (첫 장 이후에만 판정)
+            if j > i and mj.get("sender") != anchor_sender:
+                break
+            # [변경사유]: 직전 사진과의 간격이 상한 초과 → 그룹 경계
+            if (
+                j > i
+                and merge_max_gap is not None
+                and prev_at is not None
+                and (at - prev_at) > merge_max_gap
+            ):
+                break
+            prev_at = at
             for _ in range(count):
                 slots.append(
                     MsgSlot(
@@ -221,12 +244,19 @@ def match_photos_to_messages(
     different_sender_grace_seconds: int,
     different_sender_max_chars: int,
     group_text_before_max_seconds: int = 120,
+    slot_merge_max_gap_minutes: int = 2,
 ) -> MatchOutput:
     """
     매칭 수행.
     messages: id, chat_id, seq, msg_kind, sender, abs_time(ISO), body_raw, photo_count, body_norm
     """
     out = MatchOutput()
+    # [변경사유]: 0 이하면 이전 동작(간격 무제한) 유지
+    slot_merge_gap = (
+        timedelta(minutes=slot_merge_max_gap_minutes)
+        if int(slot_merge_max_gap_minutes or 0) > 0
+        else None
+    )
     # chat별 정렬
     by_chat: dict[int, list[dict[str, Any]]] = {}
     for m in messages:
@@ -258,7 +288,7 @@ def match_photos_to_messages(
 
     group_idx = 0
     for cid, msgs in by_chat.items():
-        for anchor, slots in _photo_message_slots(msgs):
+        for anchor, slots in _photo_message_slots(msgs, merge_max_gap=slot_merge_gap):
             if not slots:
                 continue
             group_idx += 1
@@ -376,6 +406,7 @@ def match_photos_to_messages(
                                 seconds=different_sender_grace_seconds
                             ),
                             diff_max_chars=different_sender_max_chars,
+                            merge_max_gap=slot_merge_gap,
                         ),
                     )
                 else:
@@ -511,11 +542,12 @@ def _collect_minute_room_texts(
     max_gap: timedelta,
     diff_grace: timedelta,
     diff_max_chars: int,
+    merge_max_gap: timedelta | None = None,
 ) -> list[GroupTextLink]:
     """같은 분에 사진이 있는 모든 방의 앞/뒤 텍스트를 모은다."""
     collected: list[GroupTextLink] = []
     for _cid, msgs in sorted(by_chat.items(), key=lambda x: x[0]):
-        for _anchor, slots in _photo_message_slots(msgs):
+        for _anchor, slots in _photo_message_slots(msgs, merge_max_gap=merge_max_gap):
             if not slots:
                 continue
             if minute_key(slots[0].abs_time) != minute:

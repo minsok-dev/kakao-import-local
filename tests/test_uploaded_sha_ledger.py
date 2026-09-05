@@ -68,3 +68,32 @@ def test_response_ledger_fields() -> None:
     assert f["next_val"] == "sns_appended"
     assert f["source_sha256"] == "b" * 64
     assert f["ocr_idx"] == 938
+
+
+def test_is_bundle_subs_complete() -> None:
+    # [변경사유]: 방안 A — 로컬 uploaded 확정 게이트
+    from kakao_import.ledger import is_bundle_subs_complete
+
+    assert is_bundle_subs_complete({}, expected_sub_count=0) is True
+    assert is_bundle_subs_complete({"next": "ocr_queued"}, expected_sub_count=1) is False
+    assert (
+        is_bundle_subs_complete(
+            {"bundle_subs": {"complete": True, "failed": 0}},
+            expected_sub_count=2,
+        )
+        is True
+    )
+    assert (
+        is_bundle_subs_complete(
+            {"bundle_subs": {"complete": False, "failed": 1}},
+            expected_sub_count=1,
+        )
+        is False
+    )
+    assert (
+        is_bundle_subs_complete(
+            {"data": {"bundle_subs": {"complete": True, "failed": 0}}},
+            expected_sub_count=1,
+        )
+        is True
+    )

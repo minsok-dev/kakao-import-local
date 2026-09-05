@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from kakao_import.config import Settings
 from kakao_import.ledger import (
     forget_uploaded_sha,
+    is_bundle_subs_complete,
     is_uploaded_sha,
     record_uploaded_sha,
     response_ledger_fields,
@@ -851,6 +852,14 @@ def cmd_upload(
                         caption_only = False
                     else:
                         raise
+                # [변경사유]: 방안 A — sub 보냈으면 bundle_subs.complete 일 때만 uploaded
+                sub_n = 0 if caption_only else len(sub_paths)
+                if not is_bundle_subs_complete(resp, expected_sub_count=sub_n):
+                    raise UploadHttpError(
+                        502,
+                        "BUNDLE_SUBS_INCOMPLETE",
+                        "server response missing complete bundle_subs for album upload",
+                    )
                 results.append(
                     {
                         "ok": True,

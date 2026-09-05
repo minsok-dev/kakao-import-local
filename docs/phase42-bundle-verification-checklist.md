@@ -10,12 +10,16 @@
 | 실데이터 / 스테이징 | **진행·현재까지 오류 없음** (2026-08-06) |
 | 부가 반영 | `_01` 앨범 파싱 · multi_room 캡션 union · ADD 구분선 · 터미널 한글 요약 |
 
-제외(의도적 비범위): 묶음 풀기 UI · 메인 수동 지정 · exact 경로 sub 자동 부착 · similar→main+sub
+제외(의도적 비범위): 묶음 풀기 UI · 메인 수동 지정 · similar→main+sub 자동 병합
+
+<!-- [변경사유]: 2026-09-06 — exact 경로 sub 부착은 방안 A로 설계·개발계획 확정 (구현 전) -->
+> **진행 예정:** exact/active/hold 시 sub 스킵 제거 → 미등록 sub append (방안 A)  
+> → [kakao-album-exact-sub-append-design.md](../../frontend/docs/kakao-album-exact-sub-append-design.md)  
+> → [kakao-album-exact-sub-append-dev-plan.md](../../frontend/docs/kakao-album-exact-sub-append-dev-plan.md)
 
 <!-- [변경사유]: 2026-08-26 — 앨범 원자 업로드는 미결정. 운영 관찰 후 별도 결정 -->
-> **보류(미결정):** PC 앨범을 similar/non_poster보다 우선해 **무조건 main+sub**로 올릴지 —  
-> [pc-album-atomic-upload-pending.md](./pc-album-atomic-upload-pending.md)  
-> (현황·대안만 기록. 코드·계약 변경 없음.)
+> **참고:** PC 앨범 A+B(로컬 collapse)는 반영됨 — [pc-album-atomic-upload-pending.md](./pc-album-atomic-upload-pending.md)  
+> non_poster 앨범 게이트(§11)는 여전히 미구현.
 
 ---
 
@@ -46,10 +50,24 @@
 - [x] 멱등 재전송 시 replay·캡션 보완 경로 동작 *(오류 없음)*
 - [x] caption: `matched_messages` 기반 `sns_caption_text` (첨부 마커 미포함) · multi_room ADD 구분선
 
-## C. Exact / hold (sub 미첨부)
+## C. Exact / hold (sub)
+
+### C-v1 (2026-08, 현행 상용 — sub 스킵)
 
 - [x] main이 exact → SNS append / hold / idle 시 로그 `bundle_subs_skipped_exact` 또는 동등 next (`sns_appended` / `dup_review` 등) 관측
 - [x] 해당 요청으로 content에 sub가 **추가되지 않음** (v1 계약) — 오류 없음
+
+### C-v2 (방안 A — 구현 후 검증) <!-- [변경사유]: 2026-09-06 -->
+
+설계: [kakao-album-exact-sub-append-design.md](../../frontend/docs/kakao-album-exact-sub-append-design.md)
+
+- [ ] main exact + 신규 `_01`… → `bundle_subs.appended` ≥ 1, 관리자 표시, **기존 main 유지**
+- [ ] 동일 재전송 → `already_attached`, 중복 없음 (**신규만** 반영)
+- [ ] sub 1건 실패 → **HTTP non-2xx**, 기성공 연결 유지, 재시도 시 already_attached
+- [ ] similar_hold + sub → hold만, 후보 content 불변
+- [ ] 이관 완료 content exact → content 미디어 연결·관리자 표시
+- [ ] 로컬: `complete` 아니거나 구서버+sub → uploaded 미확정
+- [ ] active OCR이지만 main SHA non-exact → 콘텐츠/OCR 자동 append 없음
 
 ## D. 회귀·부하
 

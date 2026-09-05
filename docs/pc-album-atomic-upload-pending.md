@@ -4,11 +4,15 @@
 <!-- [변경사유]: 2026-08-28 — 캡션 유실·1장+앨범 사례 논의 반영. A+B 방향·과거 단건 비보정·상한 10 코드 근거 추가. 구현은 아직 없음 -->
 <!-- [변경사유]: 2026-08-28 — A+B+매칭/캡션 구현: collapse→similar 순서, stem-only 묶음, stem sibling·슬롯 윈도우 -->
 <!-- [변경사유]: 2026-08-28 — §11 non_poster/uncertain·앨범 게이트 미결 문제·합의 정책(미구현) 기록. A+B 단위테스트 62 pass 재확인 -->
+<!-- [변경사유]: 2026-09-06 — 서버 exact 시 sub 스킵 누락 → 방안 A 설계·개발계획 확정 (frontend docs). 본 문서에 링크 -->
 
 > **상태: 채택 (A+B 구현됨 / non_poster 앨범 예외는 미구현)**  
 > 2026-08-28: A+B + 매칭/캡션 반영.  
 > **§11** 포스터 분류↔앨범 업로드 불일치는 **정책 합의만**, 코드 미반영.  
-> 서버 exact+sub·과거 단건 보정은 **미실시**.
+> **서버 exact+sub 누락 보완 (방안 A):** 설계·개발계획 **확정**, 구현 **전**  
+>   → [kakao-album-exact-sub-append-design.md](../../frontend/docs/kakao-album-exact-sub-append-design.md)  
+>   → [kakao-album-exact-sub-append-dev-plan.md](../../frontend/docs/kakao-album-exact-sub-append-dev-plan.md)  
+> 과거 단건 보정은 **미실시**.
 
 관련:
 
@@ -17,6 +21,7 @@
 - 코드: `src/kakao_import/payload.py` (`collapse_grouped_photo_bundles` → `_apply_similar_policy`)
 - 매칭: `src/kakao_import/matcher.py` (`_candidate_photos_for_slots`, `_attach_album_stem_siblings`)
 - 서버 상한: `frontend/lib/ingest/import/validateKakaoImportImage.ts` (`KAKAO_IMPORT_MAX_BUNDLE_MEMBERS`)
+- **서버 exact+sub (방안 A):** frontend docs 위 링크 — `receiveKakaoImport` sub 스킵 제거·미등록 append
 
 ---
 

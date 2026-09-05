@@ -221,3 +221,31 @@ def response_ledger_fields(response: dict[str, Any] | None) -> dict[str, Any]:
         "source_sha256": normalize_sha(str(data.get("source_sha256") or "")),
         "ocr_idx": ocr_idx,
     }
+
+
+def is_bundle_subs_complete(
+    response: dict[str, Any] | None,
+    *,
+    expected_sub_count: int,
+) -> bool:
+    """
+    앨범 묶음 uploaded 확정 가능 여부.
+    [변경사유]: 방안 A — sub 를 보냈는데 bundle_subs 없거나 complete=false 면 확정 금지.
+    expected_sub_count==0 이면 단건으로 간주 → True.
+    """
+    if expected_sub_count <= 0:
+        return True
+    if not isinstance(response, dict):
+        return False
+    data = response.get("data") if isinstance(response.get("data"), dict) else response
+    if not isinstance(data, dict):
+        return False
+    bundle = data.get("bundle_subs")
+    if not isinstance(bundle, dict):
+        # [변경사유]: 구서버 — sub 보냈는데 필드 없음 → uploaded 확정 금지
+        return False
+    try:
+        failed = int(bundle.get("failed") or 0)
+    except (TypeError, ValueError):
+        failed = 1
+    return bool(bundle.get("complete")) and failed == 0

@@ -32,3 +32,5 @@ def test_write_upload_run_report(tmp_path: Path) -> None:
     assert data["rooms"] == ["hongdae_bonita"]
     assert "admin_summary_ko" in data
     assert path.name == "run-report.json"
+    arch = db.parent / "runs" / data["run_id"] / "run-report.json"
+    assert arch.is_file()

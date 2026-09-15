@@ -16,9 +16,9 @@ from typing import Any
 
 from kakao_import.config import PROJECT_ROOT, Settings
 from kakao_import.caption_build import (
-    build_caption_for_photos,
+    build_captions_by_photo_ids,
+    compose_union_caption,
     similar_union_member_ids,
-    union_captions_for_photo_ids,
 )
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
@@ -205,39 +205,58 @@ def _load_grouped_photo_shape(
     """채팅 매칭 그룹 메타. slot_count≥2 는 후보 표시일 뿐, 실제 묶음은 `_01` 앨범만."""
     if not photo_ids:
         return {}
-    placeholders = ",".join("?" for _ in photo_ids)
-    rows = conn.execute(
-        f"""
-        SELECT
-          a.photo_id,
-          a.group_id,
-          a.slot_index,
-          ig.group_key,
-          ig.chat_id,
-          (
-            SELECT COUNT(*)
-            FROM photo_message_assignment ax
-            WHERE ax.group_id = a.group_id
-              AND ax.message_id IS NOT NULL
-          ) AS slot_count
-        FROM photo_message_assignment a
-        JOIN image_group ig ON ig.id = a.group_id
-        WHERE a.photo_id IN ({placeholders})
-          AND a.group_id IS NOT NULL
-          AND a.message_id IS NOT NULL
-        """,
-        tuple(photo_ids),
-    ).fetchall()
     out: dict[int, dict[str, Any]] = {}
-    for r in rows:
-        out[int(r["photo_id"])] = {
-            "group_id": int(r["group_id"]),
-            "group_key": str(r["group_key"]),
-            "chat_id": int(r["chat_id"]),
-            "slot_index": int(r["slot_index"]),
-            "slot_count": int(r["slot_count"] or 0),
-            "bundle_candidate": int(r["slot_count"] or 0) >= 2,
-        }
+    # [변경사유]: SQLite IN 변수 한도 + 행마다 COUNT 상관 서브쿼리 제거
+    chunk_size = 400
+    unique_ids = list(dict.fromkeys(int(p) for p in photo_ids if int(p or 0) > 0))
+    for i in range(0, len(unique_ids), chunk_size):
+        chunk = unique_ids[i : i + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            WITH seed AS (
+              SELECT DISTINCT photo_id
+              FROM photo_message_assignment
+              WHERE photo_id IN ({placeholders})
+            ),
+            my_groups AS (
+              SELECT DISTINCT a.group_id AS group_id
+              FROM photo_message_assignment a
+              JOIN seed s ON s.photo_id = a.photo_id
+              WHERE a.group_id IS NOT NULL
+            ),
+            sc AS (
+              SELECT a.group_id AS group_id, COUNT(*) AS slot_count
+              FROM photo_message_assignment a
+              JOIN my_groups g ON g.group_id = a.group_id
+              WHERE a.message_id IS NOT NULL
+              GROUP BY a.group_id
+            )
+            SELECT
+              a.photo_id,
+              a.group_id,
+              a.slot_index,
+              ig.group_key,
+              ig.chat_id,
+              IFNULL(sc.slot_count, 0) AS slot_count
+            FROM photo_message_assignment a
+            JOIN image_group ig ON ig.id = a.group_id
+            LEFT JOIN sc ON sc.group_id = a.group_id
+            WHERE a.photo_id IN ({placeholders})
+              AND a.group_id IS NOT NULL
+              AND a.message_id IS NOT NULL
+            """,
+            tuple(chunk) + tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            out[int(r["photo_id"])] = {
+                "group_id": int(r["group_id"]),
+                "group_key": str(r["group_key"]),
+                "chat_id": int(r["chat_id"]),
+                "slot_index": int(r["slot_index"]),
+                "slot_count": int(r["slot_count"] or 0),
+                "bundle_candidate": int(r["slot_count"] or 0) >= 2,
+            }
     return out
 
 
@@ -641,15 +660,14 @@ def build_upload_items(
             """
         ).fetchall()
 
-        from kakao_import.poster_schema import (
-            excluded_poster_shas,
-            has_any_classify_for_sha,
-        )
+        from kakao_import.poster_schema import classified_sha_set, excluded_poster_shas
 
         poster_skip = excluded_poster_shas(conn)
         if poster_skip:
             log.info("upload skip poster_non_poster shas=%s", len(poster_skip))
+        classified_ok = classified_sha_set(conn) if require_classify else None
 
+        pending: list[Any] = []
         for row in rows:
             sha = (row["sha256"] or "").lower()
             if not sha or len(sha) != 64:
@@ -663,7 +681,7 @@ def build_upload_items(
                 skipped_room += 1
                 continue
             # [변경사유]: 활성 모델 있을 때 classify 행 없으면 업로드 금지(미분류 hold)
-            if require_classify and not has_any_classify_for_sha(conn, sha):
+            if classified_ok is not None and sha not in classified_ok:
                 skipped_unclassified += 1
                 log.info("upload skip unclassified sha=%s rel=%s", sha[:12], rel_path)
                 continue
@@ -690,7 +708,20 @@ def build_upload_items(
                     MAX_UPLOAD_FILE_BYTES,
                 )
                 continue
+            pending.append(row)
 
+        # [변경사유]: 캐시 없는 장만 모아 캡션 SQL 2회로 처리 (장마다 99초 쿼리 방지)
+        need_caption_ids = [
+            int(row["photo_id"])
+            for row in pending
+            if (row["sha256"] or "").lower() not in caption_cache
+        ]
+        caption_by_photo = build_captions_by_photo_ids(conn, need_caption_ids)
+
+        for row in pending:
+            sha = (row["sha256"] or "").lower()
+            photo_id = int(row["photo_id"])
+            rel_path = str(row["rel_path"] or "").replace("\\", "/")
             matched: list[dict[str, Any]] = []
             merge_decision = row["merge_decision"]
             # [변경사유]: 증분 — caption_text_cached 재사용, 없으면 SQL 조립
@@ -698,7 +729,7 @@ def build_upload_items(
                 text = str(caption_cache.get(sha) or "")
                 reused_cache += 1
             else:
-                text = build_caption_for_photos(conn, [photo_id])
+                text = str(caption_by_photo.get(photo_id) or "")
                 rebuilt += 1
                 if (
                     not text
@@ -768,6 +799,8 @@ def build_upload_items(
         policy_result = _apply_similar_policy(items, similar_map)
         items = policy_result["items"]
         # [변경사유]: same_content/partial 묶음 — 스킵 멤버 설명을 대표 본문에 union
+        union_jobs: list[tuple[dict[str, Any], list[int]]] = []
+        union_ids: list[int] = []
         for it in items:
             meta = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
             pid = int(meta.get("photo_id") or 0)
@@ -779,7 +812,13 @@ def build_upload_items(
             member_ids = similar_union_member_ids(conn, sim) if sim else None
             if not member_ids or len(member_ids) < 2:
                 continue
-            unioned = union_captions_for_photo_ids(conn, member_ids)
+            union_jobs.append((it, member_ids))
+            union_ids.extend(member_ids)
+        union_captions = (
+            build_captions_by_photo_ids(conn, union_ids) if union_ids else {}
+        )
+        for it, member_ids in union_jobs:
+            unioned = compose_union_caption(union_captions, member_ids)
             if not unioned:
                 continue
             it["matched_messages"] = [
@@ -794,7 +833,7 @@ def build_upload_items(
                 hints["text_relation"] = "similar_union"
             log.info(
                 "similar caption union photo_id=%s members=%s chars=%s",
-                pid,
+                int((it.get("_meta") or {}).get("photo_id") or 0),
                 len(member_ids),
                 len(unioned),
             )

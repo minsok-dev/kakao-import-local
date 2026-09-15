@@ -15,6 +15,7 @@ from kakao_import.db import (
     _apply_phase2b_columns,
     clear_batch_match_data,
     connect,
+    ensure_caption_query_indexes,
     finish_batch,
     init_schema,
     insert_parse_error,
@@ -709,24 +710,32 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
     bundle = TextBundle(photo_id=photo_id)
     rows = conn.execute(
         """
+        WITH groups AS (
+          SELECT DISTINCT group_id
+          FROM photo_message_assignment
+          WHERE photo_id = ? AND group_id IS NOT NULL
+        ),
+        first_seq AS (
+          SELECT a2.group_id AS group_id, MIN(pm2.seq) AS first_photo_seq
+          FROM photo_message_assignment a2
+          JOIN groups g ON g.group_id = a2.group_id
+          JOIN parsed_message pm2 ON pm2.id = a2.message_id
+          WHERE a2.message_id IS NOT NULL
+          GROUP BY a2.group_id
+        )
         SELECT m.id AS message_id, m.chat_id, m.body_raw, m.body_norm, m.abs_time,
                m.seq AS msg_seq, cs.room_title, cs.rel_path AS chat_rel_path,
                gt.seq_in_group,
-               (
-                 SELECT MIN(pm2.seq)
-                 FROM photo_message_assignment a2
-                 JOIN parsed_message pm2 ON pm2.id = a2.message_id
-                 WHERE a2.group_id = a.group_id
-                   AND a2.message_id IS NOT NULL
-               ) AS first_photo_seq
+               fs.first_photo_seq AS first_photo_seq
         FROM photo_message_assignment a
         JOIN group_text gt ON gt.group_id = a.group_id
         JOIN parsed_message m ON m.id = gt.message_id
         JOIN chat_source cs ON cs.id = m.chat_id
+        LEFT JOIN first_seq fs ON fs.group_id = a.group_id
         WHERE a.photo_id = ?
         ORDER BY gt.seq_in_group
         """,
-        (photo_id,),
+        (photo_id, photo_id),
     ).fetchall()
     log.info(
         "text_bundle photo_id=%s rows=%s sql=group_text+first_photo_seq",
@@ -761,6 +770,7 @@ def cmd_merge(settings: Settings, mode: str | None = None) -> dict[str, Any]:
         merge_mode = "balanced"
     with connect(settings.db_path) as conn:
         _ensure_phase2(conn)
+        ensure_caption_query_indexes(conn)
         supersede_text_merges(conn)
         groups = conn.execute(
             "SELECT id, sha256, member_count FROM exact_sha_group"

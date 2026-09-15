@@ -22,6 +22,8 @@ SCHEMA_SQL_LEDGER = PROJECT_ROOT / "sql" / "006_uploaded_sha_ledger.sql"
 # [변경사유]: 장부 fingerprint/ocr_idx/거부 캐시
 SCHEMA_SQL_LEDGER_FP = PROJECT_ROOT / "sql" / "007_ledger_fingerprint.sql"
 SCHEMA_SQL_UPLOAD_STATE = PROJECT_ROOT / "sql" / "008_upload_candidate_state.sql"
+# [변경사유]: 캡션 SQL 풀스캔 방지 — 기존 DB에도 인덱스
+SCHEMA_SQL_CAPTION_IDX = PROJECT_ROOT / "sql" / "011_caption_query_indexes.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -103,6 +105,34 @@ def _apply_ledger_fingerprint_columns(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_caption_query_indexes(conn: sqlite3.Connection) -> None:
+    """캡션 조회용 인덱스. 이미 있으면 no-op. 운영 DB는 최초 1회 생성 비용만."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'photo_message_assignment'
+        """
+    ).fetchone()
+    if not row:
+        return
+    needed = ("idx_assign_photo", "idx_assign_group", "idx_exact_member_group")
+    have = {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)",
+            needed,
+        )
+    }
+    if have.issuperset(needed):
+        return
+    if not SCHEMA_SQL_CAPTION_IDX.is_file():
+        log.warning("caption index sql missing path=%s", SCHEMA_SQL_CAPTION_IDX)
+        return
+    log.info("caption indexes creating sql=%s missing=%s", SCHEMA_SQL_CAPTION_IDX.name, sorted(set(needed) - have))
+    conn.executescript(SCHEMA_SQL_CAPTION_IDX.read_text(encoding="utf-8"))
+    log.info("caption indexes ready")
+
+
 def _apply_upload_candidate_schema(conn: sqlite3.Connection) -> None:
     """008: upload candidate state tables."""
     if not SCHEMA_SQL_UPLOAD_STATE.is_file():
@@ -143,6 +173,8 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         _apply_ledger_fingerprint_columns(conn)
         # [변경사유]: 증분 업로드/스케줄러 상태 테이블
         _apply_upload_candidate_schema(conn)
+        # [변경사유]: 캡션 조회 인덱스 (기존 DB IF NOT EXISTS)
+        ensure_caption_query_indexes(conn)
         # [변경사유]: I3 — similar decided_by/at (similar 테이블이 있을 때만)
         from kakao_import.similar_detect import _apply_similar_decision_audit_columns
 

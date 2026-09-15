@@ -56,6 +56,35 @@ def test_join_before_after_uses_chat_split_not_add() -> None:
     assert f"\n\n{CHAT_SPLIT_SEPARATOR}\n\n" in raw
 
 
+def test_join_includes_sender_and_empty_body_origin() -> None:
+    # [변경사유]: 본문이 없어도 단톡방+대화명, 있으면 제목 아래 대화명
+    with_body = join_texts_by_room(
+        [
+            {
+                "chat_id": 1,
+                "room_title": "정보방",
+                "body_raw": "진주 인근이시면 놀러오세요~",
+                "sender": "달콩",
+            }
+        ]
+    )
+    assert with_body.startswith(format_room_header("정보방"))
+    assert "[대화명: 달콩]" in with_body
+    assert "진주 인근이시면 놀러오세요~" in with_body
+
+    empty_body = join_texts_by_room(
+        [
+            {
+                "chat_id": 1,
+                "room_title": "정보방",
+                "body_raw": "",
+                "sender": "달콩",
+            }
+        ]
+    )
+    assert empty_body == f"{format_room_header('정보방')}\n[대화명: 달콩]"
+
+
 def test_join_without_room_hint_keeps_plain_text() -> None:
     raw = join_texts_by_room([{"chat_id": 1, "body_raw": "hello"}])
     assert raw == "hello"

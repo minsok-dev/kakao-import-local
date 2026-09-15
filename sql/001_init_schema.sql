@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS photo_message_assignment (
   UNIQUE (batch_id, photo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_assign_msg ON photo_message_assignment(message_id);
+-- [변경사유]: 캡션 조회 WHERE photo_id / 그룹 first_seq 조인 — 풀스캔 방지
+CREATE INDEX IF NOT EXISTS idx_assign_photo ON photo_message_assignment(photo_id);
+CREATE INDEX IF NOT EXISTS idx_assign_group ON photo_message_assignment(group_id, message_id);
 
 -- 그룹 공통 설명 텍스트
 CREATE TABLE IF NOT EXISTS group_text (
@@ -120,6 +123,8 @@ CREATE TABLE IF NOT EXISTS exact_sha_member (
   excluded_from_upload INTEGER NOT NULL DEFAULT 0,
   UNIQUE (photo_id)
 );
+-- [변경사유]: exact SHA 확장 시 group_id 조인
+CREATE INDEX IF NOT EXISTS idx_exact_member_group ON exact_sha_member(group_id);
 
 -- 리뷰 항목
 CREATE TABLE IF NOT EXISTS review_item (

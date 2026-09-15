@@ -368,7 +368,7 @@ def test_build_batch_manifest_same_content_keeps_representative_and_bundle_shape
     req = manifest["requests"][0]
     assert req["item"]["local_item_id"].startswith(f"photo:{p1}:")
     assert req["item"]["matched_messages"][0]["text"] == (
-        "[단톡방: room]\n[CASE-B] 화요 바차타 특강 안내"
+        "[단톡방: room]\n[대화명: 달콩]\n[CASE-B] 화요 바차타 특강 안내"
     )
     assert len(manifest["similar_policy"]["skipped"]) == 1
     assert manifest["similar_policy"]["skipped"][0]["reason"] == "similar_non_representative"

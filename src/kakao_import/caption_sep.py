@@ -1,5 +1,6 @@
 # [변경사유]: Phase 4.2+ multi_room 캡션 — 방 사이 ADD 구분선
 # [변경사유]: 단톡방 헤더 + 이미지 앞/뒤 설명은 채팅분리 구분선 (ADD 와 구분)
+# [변경사유]: 인접 본문이 없어도 [단톡방]+[대화명]을 남겨 관리자가 출처를 확인
 """캡션 합치기 시 방·앞뒤 채팅 구분."""
 
 from __future__ import annotations
@@ -33,6 +34,45 @@ def format_room_header(title: str) -> str:
     return f"[단톡방: {title}]"
 
 
+def format_sender_header(sender: str) -> str:
+    """사진을 올린 카카오 대화명. 단톡방 제목 다음 줄."""
+    name = str(sender or "").strip()
+    if not name:
+        return ""
+    return f"[대화명: {name}]"
+
+
+def _first_sender(buf: list[dict[str, Any]]) -> str:
+    for item in buf:
+        name = str(item.get("sender") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def _origin_header_block(buf: list[dict[str, Any]]) -> str:
+    """단톡방 제목 + 대화명. 본문이 없어도 확인용으로 남긴다."""
+    title = ""
+    has_room_hint = False
+    for item in buf:
+        rt = str(item.get("room_title") or "").strip()
+        rel = str(item.get("chat_rel_path") or "").strip()
+        if not rt and not rel:
+            continue
+        has_room_hint = True
+        title = room_display_name(item.get("room_title"), item.get("chat_rel_path"))
+        if rt:
+            break
+    sender = _first_sender(buf)
+    lines: list[str] = []
+    if has_room_hint and title:
+        lines.append(format_room_header(title))
+    sender_line = format_sender_header(sender)
+    if sender_line:
+        lines.append(sender_line)
+    return "\n".join(lines)
+
+
 def _join_room_buffer(buf: list[dict[str, Any]]) -> str:
     """
     한 방 버퍼: 앞(before)→뒤(after) 전환 지점에 채팅분리 구분선.
@@ -54,7 +94,8 @@ def _join_room_buffer(buf: list[dict[str, Any]]) -> str:
             seen_after = True
         pieces.append(raw)
     if not pieces:
-        return ""
+        # [변경사유]: 인접 본문이 없어도 단톡방·대화명은 확인용으로 남긴다
+        return _origin_header_block(buf)
 
     body = pieces[0]
     i = 1
@@ -69,21 +110,10 @@ def _join_room_buffer(buf: list[dict[str, Any]]) -> str:
         body += "\n" + pieces[i]
         i += 1
 
-    has_hint = any(
-        str(x.get("room_title") or "").strip()
-        or str(x.get("chat_rel_path") or "").strip()
-        for x in buf
-    )
-    if not has_hint:
+    header = _origin_header_block(buf)
+    if not header:
         return body
-    title = ""
-    for item in buf:
-        title = room_display_name(item.get("room_title"), item.get("chat_rel_path"))
-        if title:
-            break
-    if not title:
-        return body
-    return f"{format_room_header(title)}\n{body}"
+    return f"{header}\n{body}"
 
 
 def join_texts_by_room(
@@ -110,15 +140,25 @@ def join_texts_by_room(
 
     for p in parts:
         raw = str(p.get(text_key) or "").strip()
-        if not raw:
+        sender = str(p.get("sender") or "").strip()
+        room_title = p.get("room_title")
+        chat_rel_path = p.get("chat_rel_path")
+        # [변경사유]: 본문이 없어도 단톡방·대화명 스텁은 캡션에 넣는다
+        if (
+            not raw
+            and not sender
+            and not str(room_title or "").strip()
+            and not str(chat_rel_path or "").strip()
+        ):
             continue
         room = p.get(room_key)
         pos = p.get("position")
         entry = {
             "text": raw,
             "position": pos if pos in ("before", "after") else None,
-            "room_title": p.get("room_title"),
-            "chat_rel_path": p.get("chat_rel_path"),
+            "room_title": room_title,
+            "chat_rel_path": chat_rel_path,
+            "sender": sender,
         }
         if room is None:
             if current_room is not object() and current_room is not None:

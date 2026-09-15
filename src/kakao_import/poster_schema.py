@@ -85,6 +85,14 @@ def has_any_classify_for_sha(conn: sqlite3.Connection, sha256: str) -> bool:
     return row is not None
 
 
+def classified_sha_set(conn: sqlite3.Connection) -> set[str]:
+    """poster_classify 가 있는 sha256 전체. 업로드 루프 N회 조회 대신 1회."""
+    if not poster_tables_exist(conn):
+        return set()
+    rows = conn.execute("SELECT DISTINCT lower(sha256) AS sha FROM poster_classify").fetchall()
+    return {str(r["sha"]) for r in rows if r["sha"]}
+
+
 def get_classify_row(
     conn: sqlite3.Connection, room_id: str, sha256: str
 ) -> dict[str, Any] | None:

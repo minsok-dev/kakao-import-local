@@ -979,6 +979,15 @@ def cmd_upload(
         )
         # photos_root unused warning avoid — kept for path parity with classify
         _ = photos_root
+        # [변경사유]: 403 쿠키 권한 실패 건수 — CLI 에서 카톡 알림
+        from kakao_import.cookie_permission_notify import count_insufficient_permission
+
+        permission_fail_count = count_insufficient_permission(results)
+        if permission_fail_count:
+            log.warning(
+                "upload permission fail count=%s code=INSUFFICIENT_PERMISSION",
+                permission_fail_count,
+            )
         return {
             **summary,
             "item_count": len(results),
@@ -988,6 +997,7 @@ def cmd_upload(
             "classification_state": classification_state,
             "ok": ok_n,
             "fail": fail_n,
+            "permission_fail_count": permission_fail_count,
             "manifest": str(out),
             "result_json": str(result_path),
         }

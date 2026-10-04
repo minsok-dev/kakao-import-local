@@ -387,6 +387,14 @@ def upload_cmd(
         from kakao_import.logging_util import get_logger
 
         get_logger(__name__).warning("run-report write fail err=%s", exc)
+    # [변경사유]: 403 쿠키 만료 — 카톡으로 bat 실행 안내 (알림 실패는 업로드 결과 유지)
+    perm_n = int(summary.get("permission_fail_count") or 0)
+    if perm_n > 0 and not dry_run:
+        from kakao_import.cookie_permission_notify import (
+            notify_cookie_permission_failure,
+        )
+
+        notify_cookie_permission_failure(perm_n)
     if summary.get("error"):
         raise click.ClickException(str(summary["error"]))
 

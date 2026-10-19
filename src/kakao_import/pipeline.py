@@ -19,9 +19,12 @@ from kakao_import.db import (
     finish_batch,
     init_schema,
     insert_parse_error,
+    ensure_photo_sha_mtime_column,
+    exact_group_totals,
     prune_missing_photo_files,
-    rebuild_exact_groups,
+    refresh_exact_groups_for_shas,
     replace_messages,
+    stamp_sha_mtime_from_stored,
     start_batch,
     supersede_text_merges,
     update_photo_sha,
@@ -271,6 +274,8 @@ def cmd_parse(
         msgs = 0
         photo_msgs = 0
         skipped_unchanged = 0
+        # [변경사유]: 채팅 내용이 바뀐 방만 text_merge 를 다시 돌린다
+        reparsed_rooms: list[str] = []
         for room_id, chats_dir, _photos_dir in layouts:
             if not chats_dir.is_dir():
                 continue
@@ -343,6 +348,8 @@ def cmd_parse(
                         )
                         continue
                 result = parse_chat_file(path)
+                if room_id not in reparsed_rooms:
+                    reparsed_rooms.append(room_id)
                 chat_id = upsert_chat_source(
                     conn,
                     rel_path=rel,
@@ -395,6 +402,7 @@ def cmd_parse(
             "messages": msgs,
             "photo_messages": photo_msgs,
             "skipped_unchanged": skipped_unchanged,
+            "reparsed_rooms": reparsed_rooms,
         }
         finish_batch(conn, batch_id, summary)
         conn.commit()
@@ -664,7 +672,11 @@ def cmd_hash(
     with connect(settings.db_path) as conn:
         # [변경사유]: 삭제된 로컬 파일이 exact 그룹에 남아 fail=N 누적되던 문제
         pruned = prune_missing_photo_files(conn, root)
-        rows = conn.execute("SELECT id, rel_path, sha256 FROM photo_file").fetchall()
+        ensure_photo_sha_mtime_column(conn)
+        log.info("sql select photo_file for hash room_filter=%s", sorted(want) if want else None)
+        rows = conn.execute(
+            "SELECT id, rel_path, sha256, byte_size, sha_mtime_ns FROM photo_file"
+        ).fetchall()
         if want:
             rows = [
                 r
@@ -672,23 +684,59 @@ def cmd_hash(
                 if room_id_from_rel(str(r["rel_path"] or "")) in want
             ]
         updated = 0
+        skipped_unchanged = 0
+        # [변경사유]: 바뀐 SHA(이전·이후)만 exact 그룹을 고친다
+        affected_shas: set[str] = set()
+        updated_shas: list[str] = []
         for r in rows:
             path = root / r["rel_path"]
             if not path.is_file():
                 log.warning("hash missing rel=%s", r["rel_path"])
                 continue
+            st = path.stat()
+            file_mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            stamped = r["sha_mtime_ns"]
+            sha_now = str(r["sha256"] or "")
+            if (
+                sha_now
+                and stamped is not None
+                and int(stamped) == int(file_mtime)
+                and int(r["byte_size"] or -1) == int(st.st_size)
+            ):
+                skipped_unchanged += 1
+                continue
             digest = sha256_file(path)
-            if r["sha256"] != digest:
-                update_photo_sha(conn, int(r["id"]), digest)
+            if sha_now != digest:
+                if sha_now:
+                    affected_shas.add(sha_now)
+                affected_shas.add(digest)
+                updated_shas.append(digest)
+                update_photo_sha(
+                    conn, int(r["id"]), digest, sha_mtime_ns=int(file_mtime)
+                )
                 updated += 1
+            else:
+                # [변경사유]: 내용은 같은데 스탬프만 없으면 다음 회차부터 파일을 다시 읽지 않는다
+                update_photo_sha(
+                    conn, int(r["id"]), digest, sha_mtime_ns=int(file_mtime)
+                )
             log.info("hash photo_id=%s sha=%s", r["id"], digest[:12])
-        exact = rebuild_exact_groups(conn)
+        if affected_shas:
+            exact = refresh_exact_groups_for_shas(conn, affected_shas)
+        elif int(pruned.get("pruned") or 0) > 0:
+            # prune 이 이미 전체 그룹을 다시 만들었다
+            exact = exact_group_totals(conn)
+        else:
+            log.info("exact rebuild skipped unchanged")
+            exact = exact_group_totals(conn)
         conn.commit()
         return {
             "hashed": len(rows),
             "updated": updated,
+            "skipped_unchanged": skipped_unchanged,
             "pruned_missing": pruned.get("pruned", 0),
             "room_ids": sorted(want) if want else None,
+            "updated_shas": updated_shas,
             **exact,
         }
 
@@ -763,18 +811,81 @@ def _photo_text_bundle(conn, photo_id: int) -> TextBundle:
     return bundle
 
 
-def cmd_merge(settings: Settings, mode: str | None = None) -> dict[str, Any]:
-    """Phase2: exact SHA 그룹 텍스트 collapse/merge."""
+def _select_merge_groups(
+    conn,
+    *,
+    only_room_ids: set[str] | None,
+    only_shas: set[str] | None,
+):
+    """None 은 전체. 빈 집합만 넘어오면 다시 병합할 그룹이 없다."""
+    if only_room_ids is None and only_shas is None:
+        log.info("sql text_merge select all exact_sha_group")
+        return conn.execute(
+            "SELECT id, sha256, member_count FROM exact_sha_group"
+        ).fetchall()
+    if not only_room_ids and not only_shas:
+        log.info("text_merge select skipped empty filter")
+        return []
+    clauses: list[str] = []
+    params: list[str] = []
+    if only_shas:
+        ph = ",".join("?" for _ in only_shas)
+        clauses.append(f"g.sha256 IN ({ph})")
+        params.extend(sorted(only_shas))
+    if only_room_ids:
+        likes = []
+        for rid in sorted(only_room_ids):
+            likes.append("p.rel_path LIKE ?")
+            params.append(f"{rid}/photos/%")
+        clauses.append("(" + " OR ".join(likes) + ")")
+    where = " OR ".join(clauses)
+    sql = f"""
+        SELECT DISTINCT g.id AS id, g.sha256 AS sha256, g.member_count AS member_count
+        FROM exact_sha_group g
+        LEFT JOIN exact_sha_member mem ON mem.group_id = g.id
+        LEFT JOIN photo_file p ON p.id = mem.photo_id
+        WHERE {where}
+    """
+    log.info(
+        "sql text_merge select rooms=%s shas=%s",
+        sorted(only_room_ids or []),
+        len(only_shas or []),
+    )
+    return conn.execute(sql, params).fetchall()
+
+
+def cmd_merge(
+    settings: Settings,
+    mode: str | None = None,
+    *,
+    only_room_ids: set[str] | None = None,
+    only_shas: set[str] | None = None,
+) -> dict[str, Any]:
+    """Phase2: exact SHA 그룹 텍스트 collapse/merge.
+
+    only_room_ids/only_shas 가 None 이면 기존처럼 전체.
+    둘 다 빈 집합이면 활성 merge 를 유지하고 건너뛴다.
+    """
     merge_mode = mode or settings.merge_mode
     if merge_mode not in ("safe", "balanced", "auto"):
         merge_mode = "balanced"
     with connect(settings.db_path) as conn:
         _ensure_phase2(conn)
         ensure_caption_query_indexes(conn)
-        supersede_text_merges(conn)
-        groups = conn.execute(
-            "SELECT id, sha256, member_count FROM exact_sha_group"
-        ).fetchall()
+        groups = _select_merge_groups(
+            conn, only_room_ids=only_room_ids, only_shas=only_shas
+        )
+        if only_room_ids is None and only_shas is None:
+            supersede_text_merges(conn)
+        else:
+            # [변경사유]: 이번 회차에 안 건드린 방의 활성 merge 는 유지
+            seen: set[str] = set()
+            for g in groups:
+                sha = str(g["sha256"] or "")
+                if not sha or sha in seen:
+                    continue
+                seen.add(sha)
+                supersede_text_merges(conn, sha256=sha)
         counts = {"collapse": 0, "merged": 0, "review": 0, "skipped": 0}
         for g in groups:
             sha = g["sha256"]
@@ -858,7 +969,17 @@ def cmd_merge(settings: Settings, mode: str | None = None) -> dict[str, Any]:
                 result.review_required,
             )
         conn.commit()
-        return {"mode": merge_mode, "groups": len(groups), **counts}
+        skipped_flag = (
+            1
+            if (only_room_ids is not None or only_shas is not None) and not groups
+            else 0
+        )
+        return {
+            "mode": merge_mode,
+            "groups": len(groups),
+            "skipped_unchanged": skipped_flag,
+            **counts,
+        }
 
 
 def cmd_merge_undo(
@@ -1027,13 +1148,36 @@ def cmd_run(
     assert root is not None
     if not settings.db_path.exists():
         cmd_init(settings)
+    # [변경사유]: scan 이 mtime 을 덮어쓰기 전에, 이미 해시된 파일의 기준 시각을 남긴다
+    with connect(settings.db_path) as conn:
+        stamp_sha_mtime_from_stored(conn)
+        conn.commit()
     want = normalize_room_ids(room_ids)
     out: dict[str, Any] = {"room_ids": sorted(want) if want else None}
     out["scan"] = cmd_scan(settings, root, room_ids=want)
     out["parse"] = cmd_parse(settings, root, room_ids=want)
     out["match"] = cmd_match(settings, root, room_ids=want)
-    out["hash"] = cmd_hash(settings, root, room_ids=want)
-    out["merge"] = cmd_merge(settings)
+    hash_out = cmd_hash(settings, root, room_ids=want)
+    updated_shas = set(hash_out.pop("updated_shas", []) or [])
+    out["hash"] = hash_out
+    reparsed = set(out["parse"].get("reparsed_rooms") or [])
+    if reparsed or updated_shas:
+        out["merge"] = cmd_merge(
+            settings, only_room_ids=reparsed, only_shas=updated_shas
+        )
+    else:
+        log.info("text_merge skipped unchanged")
+        out["merge"] = {
+            "mode": settings.merge_mode
+            if settings.merge_mode in ("safe", "balanced", "auto")
+            else "balanced",
+            "groups": 0,
+            "collapse": 0,
+            "merged": 0,
+            "review": 0,
+            "skipped": 0,
+            "skipped_unchanged": 1,
+        }
     out["report"] = build_report(settings, root)
     return out
 

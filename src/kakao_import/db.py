@@ -297,9 +297,119 @@ def upsert_photo(
     return int(row["id"])
 
 
-def update_photo_sha(conn: sqlite3.Connection, photo_id: int, sha256: str) -> None:
-    """SHA 갱신."""
-    conn.execute("UPDATE photo_file SET sha256 = ? WHERE id = ?", (sha256, photo_id))
+def ensure_photo_sha_mtime_column(conn: sqlite3.Connection) -> None:
+    """해시 시각 컬럼. 이미 있으면 no-op.
+
+    [변경사유]: 매 수집마다 사진 파일을 다시 읽지 않도록, 해시 계산 당시 mtime 을 남긴다.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(photo_file)").fetchall()}
+    if not cols or "sha_mtime_ns" in cols:
+        return
+    conn.execute("ALTER TABLE photo_file ADD COLUMN sha_mtime_ns INTEGER")
+    log.info("schema add column photo_file.sha_mtime_ns")
+
+
+def stamp_sha_mtime_from_stored(conn: sqlite3.Connection) -> int:
+    """SHA가 있고 스탬프가 없는 행에, 현재 저장된 mtime 을 해시 시각으로 찍는다.
+
+    [변경사유]: scan 이 mtime 을 덮어쓰기 전에 호출해야 한다.
+    마지막으로 해시된 파일과 같은 mtime 이면 다음 hash 가 파일 바이트를 다시 읽지 않는다.
+    """
+    ensure_photo_sha_mtime_column(conn)
+    cur = conn.execute(
+        """
+        UPDATE photo_file
+        SET sha_mtime_ns = mtime_ns
+        WHERE sha256 IS NOT NULL AND sha256 != ''
+          AND sha_mtime_ns IS NULL
+          AND mtime_ns IS NOT NULL
+        """
+    )
+    stamped = int(cur.rowcount if cur.rowcount is not None else 0)
+    log.info("sql sha_mtime stamp rows=%s", stamped)
+    return stamped
+
+
+def update_photo_sha(
+    conn: sqlite3.Connection,
+    photo_id: int,
+    sha256: str,
+    sha_mtime_ns: int | None = None,
+) -> None:
+    """SHA 갱신. sha_mtime_ns 가 있으면 그 파일 시각에 해시한 것으로 기록."""
+    if sha_mtime_ns is None:
+        log.info("sql update photo_file.sha256 photo_id=%s", photo_id)
+        conn.execute(
+            "UPDATE photo_file SET sha256 = ? WHERE id = ?",
+            (sha256, photo_id),
+        )
+        return
+    log.info(
+        "sql update photo_file.sha256+sha_mtime_ns photo_id=%s",
+        photo_id,
+    )
+    conn.execute(
+        "UPDATE photo_file SET sha256 = ?, sha_mtime_ns = ? WHERE id = ?",
+        (sha256, int(sha_mtime_ns), photo_id),
+    )
+
+
+def exact_group_totals(conn: sqlite3.Connection) -> dict[str, int]:
+    """현재 exact 그룹·업로드 제외 장 수."""
+    log.info("sql count exact_sha_group + excluded members")
+    groups = conn.execute("SELECT COUNT(*) c FROM exact_sha_group").fetchone()["c"]
+    excluded = conn.execute(
+        "SELECT COUNT(*) c FROM exact_sha_member WHERE excluded_from_upload = 1"
+    ).fetchone()["c"]
+    return {"exact_groups": int(groups), "excluded_from_upload": int(excluded)}
+
+
+def refresh_exact_groups_for_shas(
+    conn: sqlite3.Connection,
+    shas: set[str],
+) -> dict[str, int]:
+    """바뀐 SHA 만 exact 그룹을 다시 만든다. 대표는 photo id 가 가장 작은 장.
+
+    [변경사유]: 전체 DELETE 후 재삽입은 사진이 늘수록 쓰기 잠금이 길어진다.
+    """
+    log.info("exact refresh shas=%s", len(shas))
+    for sha in sorted(s for s in shas if s):
+        gids = conn.execute(
+            "SELECT id FROM exact_sha_group WHERE sha256 = ?",
+            (sha,),
+        ).fetchall()
+        for g in gids:
+            gid = int(g["id"])
+            conn.execute("DELETE FROM exact_sha_member WHERE group_id = ?", (gid,))
+            conn.execute("DELETE FROM exact_sha_group WHERE id = ?", (gid,))
+        ids = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM photo_file WHERE sha256 = ? ORDER BY id",
+                (sha,),
+            )
+        ]
+        log.info("sql exact refresh sha=%s members=%s", sha[:12], len(ids))
+        if not ids:
+            continue
+        cur = conn.execute(
+            """
+            INSERT INTO exact_sha_group (sha256, representative_photo_id, member_count)
+            VALUES (?, ?, ?)
+            """,
+            (sha, ids[0], len(ids)),
+        )
+        gid = int(cur.lastrowid)
+        for i, pid in enumerate(ids):
+            conn.execute(
+                """
+                INSERT INTO exact_sha_member (
+                  group_id, photo_id, is_representative, excluded_from_upload
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (gid, pid, 1 if i == 0 else 0, 0 if i == 0 else 1),
+            )
+    return exact_group_totals(conn)
 
 
 def _detach_photo_file_refs(conn: sqlite3.Connection, photo_id: int) -> None:

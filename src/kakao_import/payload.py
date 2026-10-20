@@ -20,6 +20,7 @@ from kakao_import.caption_build import (
     compose_union_caption,
     similar_union_member_ids,
 )
+from kakao_import.caption_sep import CHAT_SPLIT_SEPARATOR, ROOM_ADD_SEPARATOR
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.photo_name import kakao_album_stem_and_seq
@@ -37,6 +38,10 @@ MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
 LEGACY_HARD_SKIP_BYTES = 15 * 1024 * 1024
 # [변경사유]: Phase 4.2+ — Nginx total body · 서버 maxFiles 와 맞춤. SNS·카카오 통일 10장 (기존 5)
 MAX_BUNDLE_MEMBERS = 10
+# [변경사유]: 서버 receive 상한과 동일 — 칸 4,000 / 합계 16,000 / 최대 40칸
+MAX_INGRESS_MESSAGE_CHARS = 4_000
+MAX_INGRESS_TOTAL_CHARS = 16_000
+MAX_INGRESS_MESSAGE_COUNT = 40
 
 
 def exceeds_ingress_limit(byte_size: int) -> bool:
@@ -112,6 +117,95 @@ def _bundle_idempotency_key(member_shas: list[str], caption_fp: str) -> str:
 
 def _fingerprint_message(sent_at: str, text: str) -> str:
     return hashlib.sha256(f"{sent_at}|{text}".encode()).hexdigest()
+
+
+def _pieces_under_ingress_limit(text: str) -> list[str]:
+    """
+    한 칸이 4,000자 이하면 그대로 둔다.
+    넘으면 ADD(방) → 채팅분리 → 글자 단위 순으로 나눈다.
+    [변경사유]: 여러 방 글을 한 문자열로 붙이면 MESSAGE_TOO_LONG
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    if len(raw) <= MAX_INGRESS_MESSAGE_CHARS:
+        return [raw]
+
+    def _by_separator(blob: str, sep: str) -> list[str]:
+        parts = [p.strip() for p in blob.split(sep) if p and p.strip()]
+        return parts if len(parts) > 1 else [blob.strip()]
+
+    pieces: list[str] = []
+    for block in _by_separator(raw, ROOM_ADD_SEPARATOR):
+        if len(block) <= MAX_INGRESS_MESSAGE_CHARS:
+            pieces.append(block)
+            continue
+        for sub in _by_separator(block, CHAT_SPLIT_SEPARATOR):
+            if len(sub) <= MAX_INGRESS_MESSAGE_CHARS:
+                pieces.append(sub)
+                continue
+            # [변경사유]: 구분선이 없는 한 덩어리도 칸 상한을 넘기면 글자로 자른다
+            log.warning(
+                "caption chunked by chars len=%s limit=%s",
+                len(sub),
+                MAX_INGRESS_MESSAGE_CHARS,
+            )
+            for i in range(0, len(sub), MAX_INGRESS_MESSAGE_CHARS):
+                chunk = sub[i : i + MAX_INGRESS_MESSAGE_CHARS]
+                if chunk:
+                    pieces.append(chunk)
+    log.info(
+        "caption split for ingress chars=%s pieces=%s",
+        len(raw),
+        len(pieces),
+    )
+    return pieces
+
+
+def _cap_ingress_pieces(pieces: list[str]) -> list[str]:
+    """칸 수 40 · 합계 16,000자를 넘기면 뒤를 버린다."""
+    kept: list[str] = []
+    total = 0
+    dropped = 0
+    for piece in pieces:
+        if len(kept) >= MAX_INGRESS_MESSAGE_COUNT:
+            dropped += 1
+            continue
+        room = MAX_INGRESS_TOTAL_CHARS - total
+        if room <= 0:
+            dropped += 1
+            continue
+        if len(piece) > room:
+            kept.append(piece[:room])
+            total += room
+            dropped += 1
+            continue
+        kept.append(piece)
+        total += len(piece)
+    if dropped:
+        log.warning(
+            "caption ingress capped kept=%s dropped_pieces=%s total_chars=%s",
+            len(kept),
+            dropped,
+            total,
+        )
+    return kept
+
+
+def matched_messages_from_caption(text: str) -> list[dict[str, str]]:
+    """업로드 matched_messages. 4,000자 이하 본문은 칸 1개."""
+    out: list[dict[str, str]] = []
+    for piece in _cap_ingress_pieces(_pieces_under_ingress_limit(text)):
+        if is_attachment_marker_text(piece):
+            continue
+        out.append(
+            {
+                "sent_at": "",
+                "text": piece,
+                "message_fingerprint": _fingerprint_message("", piece),
+            }
+        )
+    return out
 
 
 def is_attachment_marker_text(text: str) -> bool:
@@ -740,13 +834,8 @@ def build_upload_items(
             if text and is_attachment_marker_text(text):
                 text = ""
             if text:
-                matched.append(
-                    {
-                        "sent_at": "",
-                        "text": text,
-                        "message_fingerprint": _fingerprint_message("", text),
-                    }
-                )
+                # [변경사유]: 여러 방 합본이 4,000자를 넘으면 칸을 나눠 전송
+                matched.extend(matched_messages_from_caption(text))
             if merge_decision == "review":
                 decision = "partial"
                 text_relation = "conflict"
@@ -821,13 +910,11 @@ def build_upload_items(
             unioned = compose_union_caption(union_captions, member_ids)
             if not unioned:
                 continue
-            it["matched_messages"] = [
-                {
-                    "sent_at": "",
-                    "text": unioned,
-                    "message_fingerprint": _fingerprint_message("", unioned),
-                }
-            ]
+            # [변경사유]: similar union 합본도 같은 칸 상한으로 나눈다
+            union_messages = matched_messages_from_caption(unioned)
+            if not union_messages:
+                continue
+            it["matched_messages"] = union_messages
             hints = it.get("match_hints")
             if isinstance(hints, dict):
                 hints["text_relation"] = "similar_union"

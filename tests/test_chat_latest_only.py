@@ -106,7 +106,7 @@ def test_cmd_parse_skips_unchanged_content_sha(tmp_path: Path) -> None:
 
 
 def test_cmd_parse_reparses_when_content_changes(tmp_path: Path) -> None:
-    """내용이 바뀌면 스킵하지 않고 메시지를 교체한다."""
+    """내용이 바뀌면 기존 줄은 두고 새 줄만 붙인다."""
     root = tmp_path / "raw"
     chats = root / "gangnam_latin" / "chats"
     (root / "gangnam_latin" / "photos").mkdir(parents=True)
@@ -124,6 +124,70 @@ def test_cmd_parse_reparses_when_content_changes(tmp_path: Path) -> None:
 
     with connect(settings.db_path) as conn:
         msgs = conn.execute(
-            "SELECT body_raw FROM parsed_message ORDER BY id"
+            "SELECT body_raw FROM parsed_message ORDER BY seq, id"
         ).fetchall()
-    assert [str(r["body_raw"]) for r in msgs] == ["두번째"]
+        sources = conn.execute("SELECT COUNT(*) AS n FROM chat_source").fetchone()
+    assert [str(r["body_raw"]) for r in msgs] == ["첫번째", "두번째"]
+    assert int(sources["n"]) == 1
+
+
+def test_cmd_parse_same_body_new_filename_skips_delete(tmp_path: Path) -> None:
+    """[변경사유]: export 파일명만 바뀌면 메시지를 지우지 않고 경로만 갱신."""
+    root = tmp_path / "raw"
+    chats = root / "gangnam_latin" / "chats"
+    (root / "gangnam_latin" / "photos").mkdir(parents=True)
+    chats.mkdir(parents=True)
+    body = _chat_text("강남 라틴클럽", "같은 대화")
+    old_txt = chats / "KakaoTalk_20260818_000621766_group.txt"
+    old_txt.write_text(body, encoding="utf-8")
+
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    cmd_parse(settings, root)
+
+    new_txt = chats / "KakaoTalk_20260818_013327453_group.txt"
+    new_txt.write_text(body, encoding="utf-8")
+    out = cmd_parse(settings, root)
+    assert out["skipped_unchanged"] == 1
+
+    with connect(settings.db_path) as conn:
+        rows = conn.execute("SELECT rel_path FROM chat_source").fetchall()
+        msgs = conn.execute(
+            "SELECT body_raw FROM parsed_message ORDER BY seq"
+        ).fetchall()
+    assert [str(r["rel_path"]) for r in rows] == [
+        "gangnam_latin/chats/KakaoTalk_20260818_013327453_group.txt"
+    ]
+    assert [str(r["body_raw"]) for r in msgs] == ["같은 대화"]
+
+
+def test_cmd_parse_appends_only_new_lines_on_new_filename(tmp_path: Path) -> None:
+    """새 export에 줄이 더 있으면 그 줄만 뒤에 붙인다."""
+    root = tmp_path / "raw"
+    chats = root / "gangnam_latin" / "chats"
+    (root / "gangnam_latin" / "photos").mkdir(parents=True)
+    chats.mkdir(parents=True)
+    old_txt = chats / "KakaoTalk_20260818_000621766_group.txt"
+    old_txt.write_text(_chat_text("강남 라틴클럽", "기존 줄"), encoding="utf-8")
+
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    cmd_parse(settings, root)
+
+    newer = (
+        _chat_text("강남 라틴클럽", "기존 줄").rstrip("\n")
+        + "\n[홍길동] [오전 12:07] 추가 줄\n"
+    )
+    new_txt = chats / "KakaoTalk_20260818_013327453_group.txt"
+    new_txt.write_text(newer, encoding="utf-8")
+    out = cmd_parse(settings, root)
+    assert out["skipped_unchanged"] == 0
+    assert "gangnam_latin" in out["reparsed_rooms"]
+
+    with connect(settings.db_path) as conn:
+        msgs = conn.execute(
+            "SELECT body_raw FROM parsed_message ORDER BY seq, id"
+        ).fetchall()
+        sources = conn.execute("SELECT COUNT(*) AS n FROM chat_source").fetchone()
+    assert [str(r["body_raw"]) for r in msgs] == ["기존 줄", "추가 줄"]
+    assert int(sources["n"]) == 1

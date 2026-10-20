@@ -237,10 +237,101 @@ def upsert_chat_source(
     return int(row["id"])
 
 
+def update_chat_source_file(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    *,
+    rel_path: str,
+    room_title: str | None,
+    file_size: int,
+    mtime_ns: int,
+    content_sha256: str,
+    encoding: str | None,
+    batch_id: int,
+) -> None:
+    """같은 대화 행의 파일 경로·해시만 갱신. 메시지는 지우지 않는다."""
+    # [변경사유]: 새 export 파일명마다 chat_source 를 지우면 CASCADE 가 방마다 수십 분
+    log.info(
+        "sql update chat_source id=%s rel=%s sha=%s",
+        chat_id,
+        rel_path,
+        content_sha256[:12],
+    )
+    conn.execute(
+        """
+        UPDATE chat_source
+        SET rel_path = ?,
+            room_title = COALESCE(?, room_title),
+            file_size = ?,
+            mtime_ns = ?,
+            content_sha256 = ?,
+            encoding = COALESCE(?, encoding),
+            last_batch_id = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (
+            rel_path,
+            room_title,
+            file_size,
+            mtime_ns,
+            content_sha256,
+            encoding,
+            batch_id,
+            chat_id,
+        ),
+    )
+
+
+def append_messages(
+    conn: sqlite3.Connection, chat_id: int, messages: list[dict[str, Any]]
+) -> int:
+    """없는 메시지만 seq 뒤에 추가. 기존 행은 삭제하지 않는다."""
+    if not messages:
+        return 0
+    log.info(
+        "sql select parsed_message max seq chat_id=%s",
+        chat_id,
+    )
+    row = conn.execute(
+        "SELECT COALESCE(MAX(seq), 0) AS s FROM parsed_message WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()
+    seq = int(row["s"] if row else 0)
+    log.info(
+        "sql insert parsed_message chat_id=%s rows=%s seq_from=%s",
+        chat_id,
+        len(messages),
+        seq + 1,
+    )
+    for m in messages:
+        seq += 1
+        conn.execute(
+            """
+            INSERT INTO parsed_message (
+              chat_id, seq, msg_kind, sender, abs_time, body_raw, body_norm, photo_count, line_no
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                seq,
+                m["msg_kind"],
+                m.get("sender"),
+                m.get("abs_time"),
+                m["body_raw"],
+                m.get("body_norm"),
+                m.get("photo_count"),
+                m.get("line_no"),
+            ),
+        )
+    return len(messages)
+
+
 def replace_messages(
     conn: sqlite3.Connection, chat_id: int, messages: list[dict[str, Any]]
 ) -> None:
-    """해당 chat 메시지 전량 교체 (멱등)."""
+    """해당 chat 메시지 전량 교체 (멱등). 첫 적재에만 사용."""
+    log.info("sql delete parsed_message chat_id=%s replace=1", chat_id)
     conn.execute("DELETE FROM parsed_message WHERE chat_id = ?", (chat_id,))
     for m in messages:
         conn.execute(

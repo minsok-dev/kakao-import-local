@@ -23,10 +23,12 @@ from kakao_import.db import (
     exact_group_totals,
     prune_missing_photo_files,
     refresh_exact_groups_for_shas,
+    append_messages,
     replace_messages,
     stamp_sha_mtime_from_stored,
     start_batch,
     supersede_text_merges,
+    update_chat_source_file,
     update_photo_sha,
     upsert_chat_source,
     upsert_photo,
@@ -162,12 +164,118 @@ def latest_chat_exports(chats_dir: Path) -> list[Path]:
     return [latest]
 
 
+def _message_identity(
+    sender: str | None,
+    abs_time: str | None,
+    body_raw: str | None,
+    msg_kind: str | None,
+) -> tuple[str, str, str, str]:
+    """같은 카카오 줄인지. 파일명·저장 시각은 포함하지 않는다."""
+    return (
+        str(sender or ""),
+        str(abs_time or ""),
+        str(body_raw or ""),
+        str(msg_kind or ""),
+    )
+
+
+def _rows_not_in_chat(
+    existing_keys: list[tuple[str, str, str, str]],
+    new_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """이미 있는 줄은 개수만큼 제외하고, 남은 줄만 반환."""
+    from collections import Counter
+
+    have = Counter(existing_keys)
+    out: list[dict[str, Any]] = []
+    for row in new_rows:
+        key = _message_identity(
+            row.get("sender"),
+            row.get("abs_time"),
+            row.get("body_raw"),
+            row.get("msg_kind"),
+        )
+        if have[key] > 0:
+            have[key] -= 1
+            continue
+        out.append(row)
+    return out
+
+
+def _room_chat_prefix(room_id: str) -> str:
+    if room_id == LEGACY_ROOM_ID:
+        return "chats/"
+    return f"{room_id}/chats/"
+
+
+def _list_room_chat_sources(conn, room_id: str) -> list[Any]:
+    """방의 chat_source. 메시지 삭제는 하지 않는다."""
+    prefix = _room_chat_prefix(room_id)
+    log.info("sql select chat_source room=%s prefix=%s", room_id, prefix)
+    return list(
+        conn.execute(
+            """
+            SELECT c.id, c.rel_path, c.content_sha256,
+                   (SELECT COUNT(*) FROM parsed_message m WHERE m.chat_id = c.id) AS msg_n
+            FROM chat_source c
+            WHERE c.rel_path LIKE ?
+            ORDER BY c.id
+            """,
+            (prefix + "%",),
+        ).fetchall()
+    )
+
+
+def _pick_kept_chat_source(rows: list[Any]) -> Any | None:
+    """메시지가 있는 행을 유지. 없으면 가장 나중 id."""
+    if not rows:
+        return None
+    return max(rows, key=lambda r: (int(r["msg_n"] or 0), int(r["id"])))
+
+
+def _load_message_keys(conn, chat_id: int) -> list[tuple[str, str, str, str]]:
+    log.info("sql select parsed_message identity chat_id=%s", chat_id)
+    found = conn.execute(
+        """
+        SELECT sender, abs_time, body_raw, msg_kind
+        FROM parsed_message
+        WHERE chat_id = ?
+        ORDER BY seq, id
+        """,
+        (chat_id,),
+    ).fetchall()
+    return [
+        _message_identity(r["sender"], r["abs_time"], r["body_raw"], r["msg_kind"])
+        for r in found
+    ]
+
+
+def _parsed_message_rows(result) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for m in result.messages:
+        rows.append(
+            {
+                "seq": m.seq,
+                "msg_kind": m.msg_kind,
+                "sender": m.sender,
+                "abs_time": m.abs_time.isoformat(timespec="seconds") if m.abs_time else None,
+                "body_raw": m.body_raw,
+                "body_norm": m.body_norm,
+                "photo_count": m.photo_count,
+                "line_no": m.line_no,
+            }
+        )
+    return rows
+
+
 def _delete_room_chat_sources(conn, root: Path, room_id: str, keep_rel: str | None) -> int:
     """
     선택되지 않은 같은 방 chat_source 삭제.
 
     [변경사유]: 최신 txt 1개만 쓰는 정책에서 과거 export 의 parsed_message 가
     DB에 남아 매칭에 섞이지 않도록 ON DELETE CASCADE 로 같이 제거한다.
+    cmd_parse 는 호출하지 않는다. CASCADE 삭제가 방마다 수십 분이라
+    기존 메시지는 유지하고 새 줄만 붙인다.
     """
     if room_id == LEGACY_ROOM_ID:
         prefix = "chats/"
@@ -263,6 +371,7 @@ def cmd_parse(
 
     [변경사유]: I7 1차 — 동일 rel + content_sha256 이고 메시지가 있으면 재파싱 스킵
     (부분 파싱+전역 wipe 금지. 날짜 창·match 증분은 후속)
+    [변경사유]: 파일명이 바뀌어도 기존 parsed_message 는 지우지 않고, 새 줄만 추가
     """
     root = root or settings.export_root
     assert root is not None
@@ -283,100 +392,109 @@ def cmd_parse(
             selected = latest_chat_exports(chats_dir)
             if not selected:
                 continue
-            selected_rel = rel_under(root, selected[0])
-            deleted = _delete_room_chat_sources(conn, root, room_id, selected_rel)
-            if deleted:
-                log.info(
-                    "parse room=%s dropped_old_chat_exports=%s keep=%s",
-                    room_id,
-                    deleted,
-                    selected_rel,
-                )
+            sources = _list_room_chat_sources(conn, room_id)
+            kept = _pick_kept_chat_source(sources)
             for path in selected:
                 st = path.stat()
                 rel = rel_under(root, path)
+                mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
                 content_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-                existing = conn.execute(
-                    """
-                    SELECT id, content_sha256 FROM chat_source
-                    WHERE rel_path = ?
-                    """,
-                    (rel,),
-                ).fetchone()
-                if (
-                    existing
-                    and str(existing["content_sha256"] or "") == content_sha
-                ):
-                    msg_row = conn.execute(
-                        "SELECT COUNT(*) AS n FROM parsed_message WHERE chat_id = ?",
-                        (int(existing["id"]),),
-                    ).fetchone()
-                    msg_n = int(msg_row["n"] if msg_row else 0)
-                    if msg_n > 0:
-                        # [변경사유]: 내용 동일 → replace_messages 생략, batch만 갱신
-                        conn.execute(
-                            """
-                            UPDATE chat_source
-                            SET last_batch_id = ?, file_size = ?, mtime_ns = ?,
-                                updated_at = datetime('now')
-                            WHERE id = ?
-                            """,
-                            (
-                                batch_id,
-                                st.st_size,
-                                getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
-                                int(existing["id"]),
-                            ),
-                        )
-                        photo_row = conn.execute(
-                            """
-                            SELECT COUNT(*) AS n FROM parsed_message
-                            WHERE chat_id = ? AND msg_kind IN ('photo', 'photo_multi')
-                            """,
-                            (int(existing["id"]),),
-                        ).fetchone()
-                        rooms += 1
-                        msgs += msg_n
-                        photo_msgs += int(photo_row["n"] if photo_row else 0)
-                        skipped_unchanged += 1
-                        log.info(
-                            "parse skip unchanged rel=%s room=%s sha=%s messages=%s",
-                            rel,
-                            room_id,
-                            content_sha[:12],
-                            msg_n,
-                        )
-                        continue
-                result = parse_chat_file(path)
-                if room_id not in reparsed_rooms:
-                    reparsed_rooms.append(room_id)
-                chat_id = upsert_chat_source(
-                    conn,
-                    rel_path=rel,
-                    room_title=result.room_title,
-                    file_size=st.st_size,
-                    mtime_ns=getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
-                    content_sha256=result.content_sha256,
-                    encoding=result.encoding,
-                    batch_id=batch_id,
+                same = next(
+                    (
+                        row
+                        for row in sources
+                        if str(row["content_sha256"] or "") == content_sha
+                        and int(row["msg_n"] or 0) > 0
+                    ),
+                    None,
                 )
-                rows = []
-                for m in result.messages:
-                    rows.append(
-                        {
-                            "seq": m.seq,
-                            "msg_kind": m.msg_kind,
-                            "sender": m.sender,
-                            "abs_time": m.abs_time.isoformat(timespec="seconds") if m.abs_time else None,
-                            "body_raw": m.body_raw,
-                            "body_norm": m.body_norm,
-                            "photo_count": m.photo_count,
-                            "line_no": m.line_no,
-                        }
+                if same is not None:
+                    # [변경사유]: 본문 해시가 같으면 파일 경로만 맞추고 메시지는 유지
+                    update_chat_source_file(
+                        conn,
+                        int(same["id"]),
+                        rel_path=rel,
+                        room_title=None,
+                        file_size=st.st_size,
+                        mtime_ns=mtime_ns,
+                        content_sha256=content_sha,
+                        encoding=None,
+                        batch_id=batch_id,
                     )
-                    if m.msg_kind in ("photo", "photo_multi"):
-                        photo_msgs += 1
-                replace_messages(conn, chat_id, rows)
+                    photo_row = conn.execute(
+                        """
+                        SELECT COUNT(*) AS n FROM parsed_message
+                        WHERE chat_id = ? AND msg_kind IN ('photo', 'photo_multi')
+                        """,
+                        (int(same["id"]),),
+                    ).fetchone()
+                    msg_n = int(same["msg_n"] or 0)
+                    rooms += 1
+                    msgs += msg_n
+                    photo_msgs += int(photo_row["n"] if photo_row else 0)
+                    skipped_unchanged += 1
+                    log.info(
+                        "parse skip unchanged rel=%s room=%s sha=%s messages=%s",
+                        rel,
+                        room_id,
+                        content_sha[:12],
+                        msg_n,
+                    )
+                    continue
+                result = parse_chat_file(path)
+                rows = _parsed_message_rows(result)
+                if kept is None:
+                    if room_id not in reparsed_rooms:
+                        reparsed_rooms.append(room_id)
+                    chat_id = upsert_chat_source(
+                        conn,
+                        rel_path=rel,
+                        room_title=result.room_title,
+                        file_size=st.st_size,
+                        mtime_ns=mtime_ns,
+                        content_sha256=result.content_sha256,
+                        encoding=result.encoding,
+                        batch_id=batch_id,
+                    )
+                    replace_messages(conn, chat_id, rows)
+                    added = rows
+                    log.info(
+                        "parse chat rel=%s room=%s messages=%s encoding=%s",
+                        rel,
+                        room_id,
+                        len(rows),
+                        result.encoding,
+                    )
+                else:
+                    chat_id = int(kept["id"])
+                    existing_keys = _load_message_keys(conn, chat_id)
+                    added = _rows_not_in_chat(existing_keys, rows)
+                    # [변경사유]: 저장 시각만 바뀐 export 는 새 줄이 없다
+                    if added:
+                        if room_id not in reparsed_rooms:
+                            reparsed_rooms.append(room_id)
+                        append_messages(conn, chat_id, added)
+                    else:
+                        skipped_unchanged += 1
+                    update_chat_source_file(
+                        conn,
+                        chat_id,
+                        rel_path=rel,
+                        room_title=result.room_title,
+                        file_size=st.st_size,
+                        mtime_ns=mtime_ns,
+                        content_sha256=result.content_sha256,
+                        encoding=result.encoding,
+                        batch_id=batch_id,
+                    )
+                    log.info(
+                        "parse append rel=%s room=%s kept=%s added=%s encoding=%s",
+                        rel,
+                        room_id,
+                        len(existing_keys),
+                        len(added),
+                        result.encoding,
+                    )
                 for err in result.errors:
                     insert_parse_error(
                         conn,
@@ -388,13 +506,9 @@ def cmd_parse(
                         detail=err.detail,
                     )
                 rooms += 1
-                msgs += len(rows)
-                log.info(
-                    "parse chat rel=%s room=%s messages=%s encoding=%s",
-                    rel,
-                    room_id,
-                    len(rows),
-                    result.encoding,
+                msgs += len(added)
+                photo_msgs += sum(
+                    1 for m in added if m["msg_kind"] in ("photo", "photo_multi")
                 )
         summary = {
             "batch_id": batch_id,

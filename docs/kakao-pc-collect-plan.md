@@ -10,7 +10,7 @@
 | 상태 | **계약·실측 확정 · 골격 구현** (`kakao-pc-collect`) |
 | 구현 위치 | **`F:/site_kdance/TEST_web/kakao-pc-collect`** (이 레포에 UI 자동화 넣지 않음) |
 | 대상 방 | 단체방 **약 6개** (허용 목록) |
-| 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지) |
+| 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지). 확정 비포스터는 import가 `non_posters/`로 옮긴다 |
 | 후속 | 수집 종료 시 `kakao-import run` + `similar-detect` **명시 호출** (폴더 watcher 아님) |
 
 관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md)
@@ -33,10 +33,12 @@ run → similar-detect → similar-review(사람) → upload --dry-run → uploa
 ```
 
 <!-- [변경사유]: 잡사진 제외는 수집기가 아니라 import 분류기. 계약만 있음 -->
-포스터 vs 일상 사진 분류는 수집 단계가 아니다. 계약: [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발: [poster-classifier-dev.md](./poster-classifier-dev.md) (미구현).
+포스터 vs 일상 사진 분류는 수집 단계가 아니다. 계약: [poster-classifier-plan.md](./poster-classifier-plan.md) · 개발: [poster-classifier-dev.md](./poster-classifier-dev.md). 확정 비포스터 폴더 분리는 import가 한다.
 
 입력은 방별 `input/raw/<room_id>/chats` + `photos`이다. 구 `chats/`+`photos/`는 `_legacy` 호환.  
-카톡이 만드는 **원본 파일명·형식**을 유지해야 한다 (리네임·재인코딩 금지).
+카톡이 만드는 **원본 파일명·형식**을 유지해야 한다 (리네임·재인코딩 금지).  
+<!-- [변경사유]: 2026-11-01 — non_posters 에 있는 장도 이미 받은 사진 -->
+새 파일은 계속 `photos/`에만 복사한다. 같은 방 `non_posters/`의 파일명·더 큰 스템은 이미 받은 것으로 보고, 그 장을 `photos/`로 다시 받지 않는다.
 
 ---
 

@@ -353,7 +353,10 @@ ingest에만 쌓이고 GPT에 안 쓰는 경로 **금지**.
   - **4.1:** `kakao-import similar-review` — 로컬 브라우저 썸네일 + decision + **partial 서브그룹** (upload 미적용)  
   - **4.2:** upload policy로 큐 반영 + dry-run/result JSON 사유 노출 ✅  
   <!-- [변경사유]: Phase 4.2+ 구현 — 채팅 매칭 묶음 main+sub -->
-  - **4.2+:** 채팅 `image_group` 묶음 → 서버 1 OCR main+sub ✅ (similar는 대표 1장 유지 · 불일치 시 있는 장만 · 상한 5 · exact 시 sub 미첨부)
+  - **4.2+:** 채팅 `image_group` 묶음 → 서버 1 OCR main+sub ✅ (similar는 대표 1장 유지 · 불일치 시 있는 장만 · 상한 5 · exact 시 sub 미첨부)  
+  <!-- [변경사유]: 2026-11-01 — SHA 결정 기억, non_poster 폴더 분리 -->
+  - **SHA 기억:** 이미 정한 similar 결정은 사진 SHA에 남고, 리뷰에는 새 사진과 기존 대표만 나온다. [similar-group-decisions.md](./similar-group-decisions.md)  
+  - **비포스터 폴더:** 확정 `non_poster`만 `<room_id>/non_posters/`로 옮긴다. [poster-classifier-plan.md](./poster-classifier-plan.md) §4.0
 - similar **자동 병합·자동 삭제 없음**  
 - 서버 Similar hold가 이미 있으므로, 로컬 similar는 **배치 안 정리·운영 보조** (서비스 전체 중복 방지 본경로 아님)
 

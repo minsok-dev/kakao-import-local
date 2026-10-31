@@ -27,10 +27,13 @@ PC 다운로드 파일과 대화 내보내기를 사용한다.
 ```text
 input/raw/
   <room_id>/
-    chats/     # 해당 방 export txt
-    photos/    # 해당 방 이미지
-  chats/ + photos/   # 구 레이아웃 → room_id=_legacy
+    chats/         # 해당 방 export txt
+    photos/        # 포스터 · uncertain · 아직 분류 전
+    non_posters/   # 확정 non_poster (같은 파일명). 스캔하지 않음. 방 매칭은 photos 와 같음
+  chats/ + photos/ + non_posters/   # 구 레이아웃 → room_id=_legacy
 ```
+
+`non_posters/` 규칙: [poster-classifier-plan.md](./poster-classifier-plan.md) §4.0.
 
 ## 3. 엔티티 (SQLite) — Phase 0/1 목표
 

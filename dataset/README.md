@@ -1,11 +1,13 @@
 # 포스터 분류 학습 데이터
 
 <!-- [변경사유]: 운영자가 복사본만 모으도록. 원본 photos/ 이동·삭제 금지 -->
+<!-- [변경사유]: 2026-11-01 — 운영 non_posters/ 와 이 학습 폴더를 섞지 않음 -->
 
 계약: [docs/poster-classifier-plan.md](../docs/poster-classifier-plan.md)  
 개발: [docs/poster-classifier-dev.md](../docs/poster-classifier-dev.md)
 
-원본 `input/raw/<방id>/photos` 는 **그대로 둔다.** 여기에는 **복사본만** 넣는다.
+여기에는 **학습용 복사본만** 넣는다.  
+운영 중 확정된 비포스터 파일은 `input/raw/<방id>/non_posters/`로 옮겨지며, 그 폴더와 이 `dataset/non_poster/`는 다르다. 계약 §4.0.
 
 ```text
 dataset/

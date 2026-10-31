@@ -1,11 +1,12 @@
 # 로컬 포스터 분류기 — 계약 (CLIP + 작은 분류기)
 
 <!-- [변경사유]: 2026-08-18 — 수집 잡사진(일상 스냅)을 업로드에서 빼되 원본·매칭은 유지. 비용 없이 로컬 재학습 -->
+<!-- [변경사유]: 2026-11-01 — 확정 non_poster 만 같은 방 non_posters 로 옮긴다. 학습 dataset 복사본과는 별개 -->
 
 | 항목 | 내용 |
 |------|------|
 | 기준일 | 2026-08-18 |
-| 상태 | **계약 초안 · 미구현** (구현 단계: [poster-classifier-dev.md](./poster-classifier-dev.md)) |
+| 상태 | C0~C3 구현. 2026-11-01부터 확정 `non_poster`는 `non_posters/` (§4.0). 단계: [poster-classifier-dev.md](./poster-classifier-dev.md) |
 | 위치 | `kakao-import-local` (수집기 `kakao-pc-collect`에 넣지 않음) |
 | 비용 | 클라우드 API 없음. OpenCLIP 체크포인트 1회 다운로드 후 오프라인 |
 | 관련 | [privacy-retention.md](./privacy-retention.md) · [kakao-pc-collect-plan.md](./kakao-pc-collect-plan.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-dev.md](./poster-classifier-dev.md) |
@@ -21,8 +22,8 @@ similar-review(같은 그림인지)와 **다른 문제**다. 이 문서는 “�
 
 | 한다 | 하지 않는다 |
 |------|-------------|
-| 업로드 큐에서 **확실한 비포스터만** 제외 | 원본 삭제·이동·리네임 |
-| 판정만 DB/JSON에 저장 | `input/raw/<room_id>/photos` 레이아웃 변경 |
+| 업로드 큐에서 **확실한 비포스터만** 제외 | 원본 삭제·리네임·재인코딩·덮어쓰기 |
+| 확정 `non_poster`만 같은 방 `non_posters/`로 **파일명 유지 이동** | 포스터·`uncertain`을 `photos/` 밖으로 빼기 |
 | 오분류를 정답으로 넣어 **재학습** | 유료 OCR/비전 API |
 | 애매하면 **통과** (포스터 누락이 더 손해) | 글자 수·키워드만으로 즉시 합격/탈락 |
 
@@ -69,11 +70,32 @@ kakao-import upload
 
 ## 4. 식별자 · 저장
 
-이미지는 이동하지 않는다.
+포스터와 `uncertain`은 `photos/`에 둔다. 확정된 `non_poster`만 같은 파일명으로 `non_posters/`에 둔다. 바이트·파일명은 바꾸지 않는다.
 
 ```text
-input/raw/<room_id>/photos/KakaoTalk_....jpg
+input/raw/<room_id>/photos/KakaoTalk_....jpg          포스터 · uncertain
+input/raw/<room_id>/non_posters/KakaoTalk_....jpg    확정 non_poster
+input/raw/photos/…  ·  input/raw/non_posters/…       구 레이아웃(_legacy)도 동일
 ```
+
+학습용 `dataset/poster`, `dataset/non_poster`는 **복사본**이다. 운영 파일을 거기로 옮기지 않는다.
+
+### 4.0 운영 폴더 (2026-11-01)
+
+| 상태 | 폴더 | 업로드 |
+|------|------|--------|
+| `poster`, `uncertain` | `<room_id>/photos/` | 기존 규칙 |
+| `non_poster` | `<room_id>/non_posters/` | 제외 (`excluded_from_upload=1`) |
+
+- 옮기는 시점: `poster-classify`가 판정을 기록한 직후, 그리고 `poster-label`(사람 확정) 직후. 사람이 이미 정한 행은 모델이 덮어쓰지 않고, 폴더만 그 사람 상태에 맞춘다.
+- DB: `photo_file.rel_path`, `poster_classify.rel_path`를 `방/non_posters/파일명`으로 바꾼다. 다음 prune이 없는 파일로 보고 행을 지우지 않게 한다.
+- 방 매칭: 경로의 `non_posters`도 `photos`와 같이 그 방 id로 본다. 구 레이아웃 `non_posters/파일`은 `_legacy`.
+- 스캔은 **`photos/`만** 돈다. `non_posters/`를 새 사진으로 다시 넣지 않는다.
+- 목적지에 같은 이름이 이미 있으면 옮기지 않고 로그를 남긴다.
+- 나중에 포스터나 `uncertain`으로 바꾸면 파일을 `photos/`로 되돌린다.
+- 수집기(`kakao-pc-collect`)는 새 다운로드를 계속 `photos/`에 넣되, `non_posters`에 있는 파일명과 더 큰 스템은 **이미 받은 사진**으로 본다. 안 그러면 다음 수집이 같은 장을 `photos/`로 다시 받는다.
+
+이미 `non_poster`로만 표시된 파일은 다음 `poster-classify` 또는 사람 라벨 저장 때 옮겨진다. 서버 재시작은 필요 없다.
 
 ### 4.1 키
 
@@ -217,7 +239,7 @@ models/
 ## 9. 구현 단계 (코드)
 
 1. **분류기만** — train / classify CLI. OCR 없음.  
-2. **import 연동** — hash 이후, upload 전에 판정. `non_poster`만 제외. 방 폴더 불변.  
+2. **import 연동** — hash 이후, upload 전에 판정. `non_poster`만 제외하고 `non_posters/`로 옮긴다 (§4.0). 포스터·`uncertain`은 `photos/`에 둔다.  
 3. **사람 확정·재학습** — 오분류를 dataset에 넣고 train. test 통과 시 활성화.  
 4. **OCR 보조** — uncertain이 계속 많을 때만. 분류기 특징으로만.
 

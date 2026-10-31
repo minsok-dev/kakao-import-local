@@ -87,13 +87,15 @@ def room_id_from_rel(rel: str) -> str:
     """
     상대경로에서 방 id.
     gangnam_latin/photos/a.jpg → gangnam_latin
+    gangnam_latin/non_posters/a.jpg → gangnam_latin
     chats/a.txt (구 레이아웃) → _legacy
     [변경사유]: 방별 폴더 매칭 — 다른 방 캡션과 섞이지 않게.
+    [변경사유]: non_posters 로 옮긴 파일도 같은 방 캡션과 매칭한다.
     """
     parts = (rel or "").replace("\\", "/").strip("/").split("/")
-    if len(parts) >= 2 and parts[1] in ("chats", "photos"):
+    if len(parts) >= 2 and parts[1] in ("chats", "photos", "non_posters"):
         return parts[0]
-    if parts and parts[0] in ("chats", "photos"):
+    if parts and parts[0] in ("chats", "photos", "non_posters"):
         return LEGACY_ROOM_ID
     return LEGACY_ROOM_ID
 
@@ -108,7 +110,8 @@ def iter_room_layouts(root: Path) -> list[tuple[str, Path, Path]]:
         raise FileNotFoundError(f"export root missing: {root}")
     out: list[tuple[str, Path, Path]] = []
     for child in sorted(root.iterdir()):
-        if not child.is_dir() or child.name in ("chats", "photos"):
+        # [변경사유]: non_posters 는 스캔 대상이 아니다
+        if not child.is_dir() or child.name in ("chats", "photos", "non_posters"):
             continue
         chats = child / "chats"
         photos = child / "photos"

@@ -29,8 +29,9 @@ torch / OpenCLIP은 **코드가 extra로 넣을 때** 같이 받는다. 운영�
 
 ## 1. 한 줄 목표
 
-`kakao-import run` 이후, SHA가 있는 사진에 대해 **확실한 비포스터만** 업로드 큐에서 빼되  
-`input/raw/<room_id>/photos` 파일은 손대지 않는다.
+`kakao-import run` 이후, SHA가 있는 사진에 대해 **확실한 비포스터만** 업로드 큐에서 뺀다.  
+확정 `non_poster`는 같은 파일명으로 `input/raw/<room_id>/non_posters/`에 둔다. 포스터·`uncertain`은 `photos/`에 둔다.  
+계약: [poster-classifier-plan.md](./poster-classifier-plan.md) §4.0 (2026-11-01).
 
 ```text
 kakao-pc-collect
@@ -46,7 +47,7 @@ C2 전에는 `poster-classify`가 없어도 오늘과 동일하게 동작해야 
 
 ## 2. 하지 말 것 (전 단계 공통)
 
-- `photos/` 이동·삭제·리네임
+- `photos/` 삭제·리네임·재인코딩·덮어쓰기. 확정 `non_poster`의 `photos/` ↔ `non_posters/` 이동만 예외 (계약 §4.0)
 - `exact_sha_member.excluded_from_upload` 에 포스터 판정을 덮어쓰기  
   (그 컬럼은 **동일 SHA 중복 장** 전용. hash가 매번 재작성함)
 - 파일명만의 `ignore_list.json`
@@ -354,7 +355,8 @@ pip install -e ".[poster]"
 
 - [x] C0 pytest (torch 없이) 통과  
 - [x] C1 활성 후보 모델 1개 + 오제외·threshold가 json에 있음 (`poster-clip-v1`, 2026-08-18)  
-- [x] C2 dry-run 필터·similar skip 코드 반영. 원본 폴더 불변  
+- [x] C2 dry-run 필터·similar skip 코드 반영. 당시에는 원본 폴더를 그대로 둠  
+- [x] 2026-11-01 확정 `non_poster`만 `non_posters/`로 이동 (`poster_place`). 포스터·`uncertain`은 `photos/`  
 - [x] C3 human CLI (`poster-label`) · activate 게이트  
 - [ ] 운영 DB에 `poster-classify` 적용 후 dry-run 확인 (운영자 실행)  
 - [x] ESENCIA golden·기존 similar/upload 테스트 회귀 없음 (phase4 1건은 기존 실패)  

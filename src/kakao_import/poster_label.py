@@ -1,4 +1,4 @@
-# [변경사유]: 사람 확정 > 모델. 재학습해도 human 행 유지
+# [변경사유]: 사람 확정 > 모델. 재학습해도 human 행 유지. non_poster 는 폴더를 분리한다
 """포스터 사람 라벨."""
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def cmd_poster_label(
     status: str,
     room_id: str | None = None,
 ) -> dict[str, Any]:
-    """human 확정. 파일은 건드리지 않음."""
+    """human 확정. non_poster 는 non_posters 로, 그 외는 photos 로 파일을 맞춘다."""
     sha = sha256.strip().lower()
     if len(sha) != 64:
         return {"ok": False, "error": "sha256 must be 64 hex"}
@@ -78,6 +78,12 @@ def cmd_poster_label(
                 status,
                 excl,
             )
+            # [변경사유]: 사람 라벨 직후 실제 파일을 상태 폴더로 옮긴다
+            root = settings.export_root
+            if root is not None:
+                from kakao_import.poster_place import place_classified_photo
+
+                place_classified_photo(conn, root, int(r["id"]), rel, status)
         conn.commit()
         check = get_classify_row(conn, room_id or "", sha) if room_id else None
     rebuild_count = mark_candidates_needs_rebuild_by_sha(

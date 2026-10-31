@@ -1,4 +1,4 @@
-# [변경사유]: hash 이후 판정만 기록. 파일 이동 금지. human 행 유지. fail-open
+# [변경사유]: hash 이후 판정 기록. non_poster 만 non_posters 로 이동. human 행 유지. fail-open
 """포스터 분류 적용."""
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from kakao_import.poster_const import (
 )
 from kakao_import.poster_decision import decide_status, excluded_flag
 from kakao_import.poster_embed import embed_cached, extra_install_hint, has_poster_extra
+from kakao_import.poster_place import place_classified_photo
 from kakao_import.poster_schema import ensure_poster_schema, get_classify_row
 
 log = get_logger(__name__)
@@ -114,6 +115,34 @@ def _upsert_classify(
     return "updated" if existing else "inserted"
 
 
+def _sync_classified_file(
+    conn,
+    root: Path | None,
+    *,
+    photo_id: int,
+    rel: str,
+    room_id: str,
+    sha: str,
+    action: str,
+    status: str,
+) -> str:
+    """판정 상태의 폴더로 파일을 맞춘다. human 행은 저장된 상태를 따른다.
+
+    [변경사유]: 모델이 human 행을 덮지 않아도, 이미 확정된 non_poster 는 폴더를 맞춘다.
+    """
+    if root is None:
+        return rel
+    place_status = status
+    if action == "skipped_human":
+        existing = get_classify_row(conn, room_id, sha)
+        if not existing:
+            return rel
+        place_status = str(existing.get("status") or "")
+    if not place_status:
+        return rel
+    return place_classified_photo(conn, root, photo_id, rel, place_status)
+
+
 def cmd_poster_classify(
     settings,
     root: Path | None = None,
@@ -159,6 +188,7 @@ def cmd_poster_classify(
         "skipped_human": 0,
         "missing_file": 0,
         "skipped_room": 0,
+        "placed": 0,
     }
     with connect(settings.db_path) as conn:
         ensure_poster_schema(conn)
@@ -215,6 +245,18 @@ def cmd_poster_classify(
                 else:
                     counts["classified"] += 1
                     counts["non_poster"] += 1
+                new_rel = _sync_classified_file(
+                    conn,
+                    root,
+                    photo_id=photo_id,
+                    rel=rel,
+                    room_id=room_id,
+                    sha=sha,
+                    action=action,
+                    status=STATUS_NON_POSTER,
+                )
+                if new_rel != rel:
+                    counts["placed"] += 1
                 continue
             vec = embed_cached(abs_path, sha)
             if not vec:
@@ -247,6 +289,18 @@ def cmd_poster_classify(
                 status=status,
                 source=SOURCE_MODEL,
             )
+            new_rel = _sync_classified_file(
+                conn,
+                root,
+                photo_id=photo_id,
+                rel=rel,
+                room_id=room_id,
+                sha=sha,
+                action=action,
+                status=status,
+            )
+            if new_rel != rel:
+                counts["placed"] += 1
             if action == "skipped_human":
                 counts["skipped_human"] += 1
                 continue

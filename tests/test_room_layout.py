@@ -26,8 +26,10 @@ _TINY_PNG = (
 
 def test_room_id_from_rel() -> None:
     assert room_id_from_rel("gangnam_latin/photos/a.jpg") == "gangnam_latin"
+    assert room_id_from_rel("gangnam_latin/non_posters/a.jpg") == "gangnam_latin"
     assert room_id_from_rel("gangnamton_news/chats/x.txt") == "gangnamton_news"
     assert room_id_from_rel("photos/a.jpg") == LEGACY_ROOM_ID
+    assert room_id_from_rel("non_posters/a.jpg") == LEGACY_ROOM_ID
     assert room_id_from_rel("chats/x.txt") == LEGACY_ROOM_ID
 
 

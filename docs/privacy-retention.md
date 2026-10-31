@@ -11,9 +11,10 @@ PC 다운로드 파일과 대화 내보내기를 사용한다.
 
 | 규칙 | 내용 |
 |------|------|
-| 금지 | 원본 export·이미지 **수정·삭제·이동·덮어쓰기** |
-| 허용 | 읽기 전용 스캔, SQLite에 메타·fingerprint·결정만 저장 |
-| CLI | delete/원본 변경 명령 **제공하지 않음** |
+| 금지 | 원본 export·이미지 **수정·삭제·리네임·재인코딩·덮어쓰기** |
+| 예외 | 확정 `non_poster`만 같은 방 `photos/` ↔ `non_posters/`로 **파일명 유지 이동**. DB `rel_path`를 같이 바꾼다. 목적지에 같은 이름이 있으면 옮기지 않는다. [poster-classifier-plan.md](./poster-classifier-plan.md) §4.0 |
+| 허용 | 읽기 전용 스캔, SQLite에 메타·fingerprint·결정 저장 |
+| CLI | delete/원본 내용 변경 명령 **제공하지 않음** |
 
 ## 3. 로그
 

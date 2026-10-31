@@ -175,7 +175,7 @@ def _page_html() -> str:
     </select>
     <button type="button" id="btn-apply" class="primary">필터 적용</button>
   </div>
-  <div class="note">Phase 4.1 · 썸네일=확대 · 「부분」=같은/다른 혼합 서브그룹 · upload 적용은 4.2+ · 기본 필터=보류</div>
+  <div class="note">기본 필터=보류. 이미 정한 포스터는 다시 열지 않고, 새로 붙은 사진과 기존 대표만 표시합니다.</div>
 </header>
 <main>
   <div id="list" class="empty">불러오는 중…</div>
@@ -314,6 +314,9 @@ function renderGroup(g) {
         s.is_singleton ? ("단독#"+s.photo_ids[0]) : ("묶음["+s.photo_ids.join(",")+"]")
       ).join(" · ")}</div>`
     : "";
+  const hint = g.review_hint
+    ? `<div class="meta">${esc(g.review_hint)}</div>`
+    : "";
   return `<section class="group" id="g-${g.group_id}">
     <div class="group-head">
       <div>
@@ -322,6 +325,7 @@ function renderGroup(g) {
           · decision=<b>${LABELS[g.decision]||g.decision}</b>
           · policy=<code>${esc(g.upload_policy)}</code></div>
         ${sgSummary}
+        ${hint}
       </div>
       <div class="status" id="st-${g.group_id}"></div>
     </div>

@@ -273,6 +273,19 @@ def _load_similar_membership(
     for r in rows:
         pid = int(r["photo_id"])
         decision = str(r["decision"] or "deferred")
+        # [변경사유]: 새 사진 검토 그룹과 기존 확정 그룹에 대표가 같이 있으면 확정 쪽을 업로드에 쓴다
+        prev = out.get(pid)
+        if prev is not None:
+            prev_deferred = str(prev.get("decision") or "") == "deferred"
+            new_deferred = decision == "deferred"
+            if not prev_deferred and new_deferred:
+                log.info(
+                    "similar membership keep non-deferred photo_id=%s group_id=%s skip_deferred_group=%s",
+                    pid,
+                    prev.get("group_id"),
+                    int(r["group_id"]),
+                )
+                continue
         out[pid] = {
             "group_id": int(r["group_id"]),
             "group_key": str(r["group_key"]),

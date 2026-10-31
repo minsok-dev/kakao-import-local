@@ -664,3 +664,79 @@ def test_rebuild_deferred_stays_deferred_after_rebuild(tmp_path: Path) -> None:
         assert list_similar_groups(conn)[0]["decision"] == "deferred"
         conn.commit()
 
+
+def _chain_hashes() -> list[str]:
+    """거리 1로만 이어지는 4장. p4 는 p3 과만 직접 가깝다."""
+    return [
+        "0000000000000000",
+        "0000000000000001",
+        "0000000000000003",
+        "0000000000000007",
+    ]
+
+
+def test_new_similar_keeps_same_content_and_reviews_only_rep(tmp_path: Path) -> None:
+    """[변경사유]: 새 포스터가 붙어도 기존 같은 콘텐츠는 유지하고, 검토는 새 장+대표만."""
+    hashes = _chain_hashes()
+    assert hamming_hex(hashes[2], hashes[3]) == 1
+    assert hamming_hex(hashes[0], hashes[3]) > 1
+    db = tmp_path / "delta-same.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        ids: list[int] = []
+        for i, hx in enumerate(hashes[:3]):
+            pid = _insert_photo(conn, rel=f"photos/{i}.jpg", sha=f"sha-{i}")
+            _insert_sig(conn, pid, hx, hx, f"sha-{i}")
+            ids.append(pid)
+        rebuild_similar_groups(conn, max_distance=1)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(
+            conn, group_id=gid, decision="same_content", representative_photo_id=ids[0]
+        )
+        p4 = _insert_photo(conn, rel="photos/3.jpg", sha="sha-3")
+        _insert_sig(conn, p4, hashes[3], hashes[3], "sha-3")
+        stats = rebuild_similar_groups(conn, max_distance=1)
+        assert stats.get("decisions_restored") == 1
+        groups = list_similar_groups(conn)
+        same = [g for g in groups if g["decision"] == "same_content"]
+        deferred = [g for g in groups if g["decision"] == "deferred"]
+        assert len(same) == 1
+        assert {m["photo_id"] for m in same[0]["members"]} == set(ids)
+        assert same[0]["representative_photo_id"] == ids[0]
+        assert len(deferred) == 1
+        assert {m["photo_id"] for m in deferred[0]["members"]} == {ids[0], p4}
+        assert deferred[0]["review_hint"]
+        conn.commit()
+
+
+def test_new_similar_hides_unrelated_different_content(tmp_path: Path) -> None:
+    """[변경사유]: 다른 콘텐츠로 정한 포스터는, 새 장과 직접 비슷하지 않으면 리뷰에 안 나온다."""
+    hashes = _chain_hashes()
+    db = tmp_path / "delta-diff.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        ids: list[int] = []
+        for i, hx in enumerate(hashes[:3]):
+            pid = _insert_photo(conn, rel=f"photos/{i}.jpg", sha=f"sha-{i}")
+            _insert_sig(conn, pid, hx, hx, f"sha-{i}")
+            ids.append(pid)
+        rebuild_similar_groups(conn, max_distance=1)
+        gid = list_similar_groups(conn)[0]["group_id"]
+        set_similar_group_decision(conn, group_id=gid, decision="different_content")
+        p4 = _insert_photo(conn, rel="photos/3.jpg", sha="sha-3")
+        _insert_sig(conn, p4, hashes[3], hashes[3], "sha-3")
+        rebuild_similar_groups(conn, max_distance=1)
+        groups = list_similar_groups(conn)
+        shown: set[int] = set()
+        for g in groups:
+            if g["decision"] != "deferred":
+                continue
+            shown.update(int(m["photo_id"]) for m in g["members"])
+        assert p4 in shown
+        assert ids[2] in shown
+        assert ids[0] not in shown
+        assert ids[1] not in shown
+        conn.commit()
+

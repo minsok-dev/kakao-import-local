@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kakao_import.logging_util import get_logger
-from kakao_import.similar_cluster import PhotoSig, cluster_similar_photos
+from kakao_import.similar_cluster import (
+    PhotoSig,
+    cluster_similar_photos,
+    min_perceptual_distance,
+)
 from kakao_import.similar_policy import (
     DEFAULT_SIMILAR_MAX_DISTANCE,
     VALID_DECISIONS,
@@ -65,6 +69,8 @@ def ensure_similar_schema(conn: sqlite3.Connection) -> None:
     _apply_phase41_partial_columns(conn)
     # [변경사유]: I3 — decided_by / decided_at
     _apply_similar_decision_audit_columns(conn)
+    # [변경사유]: 사람 결정을 SHA 장부에 남겨 그룹 재구성 후에도 유지
+    _apply_similar_sha_memory(conn)
 
 
 def resolve_photo_path(root: Path, rel_path: str) -> Path | None:
@@ -179,6 +185,496 @@ def _apply_similar_decision_audit_columns(conn: sqlite3.Connection) -> None:
     )
 
 
+# [변경사유]: 그룹 fingerprint 가 바뀌면 설정이 사라지던 문제 — SHA 장부로 결정 유지
+_REVIEW_DELTA_HINT = (
+    "이미 결정한 포스터는 빼 두었습니다. 새 사진과 기존 대표만 표시합니다."
+)
+
+_SHA_MEMORY_UPSERT_SQL = """
+INSERT INTO similar_sha_memory (
+  sha_key, canonical_key, is_solo, decided_by, decided_at
+) VALUES (?, ?, ?, ?, datetime('now'))
+ON CONFLICT(sha_key) DO UPDATE SET
+  canonical_key = excluded.canonical_key,
+  is_solo = excluded.is_solo,
+  decided_by = excluded.decided_by,
+  decided_at = datetime('now')
+"""
+
+
+def _apply_similar_sha_memory(conn: sqlite3.Connection) -> None:
+    """similar_sha_memory + similar_image_group.review_hint (이미 있으면 skip)."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='similar_image_group'"
+    ).fetchone()
+    if not row:
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS similar_sha_memory (
+          sha_key TEXT PRIMARY KEY,
+          canonical_key TEXT NOT NULL,
+          is_solo INTEGER NOT NULL DEFAULT 0,
+          decided_by TEXT,
+          decided_at TEXT
+        )
+        """
+    )
+    log.info(
+        "similar sha memory schema sql=%s",
+        "CREATE TABLE IF NOT EXISTS similar_sha_memory (sha_key PRIMARY KEY, canonical_key, is_solo, decided_by, decided_at)",
+    )
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(similar_image_group)").fetchall()
+    }
+    if "review_hint" not in cols:
+        conn.execute("ALTER TABLE similar_image_group ADD COLUMN review_hint TEXT")
+        log.info("schema add column similar_image_group.review_hint")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '11')"
+    )
+
+
+def _photo_sha_key(sha: str | None, photo_id: int) -> str:
+    """64hex SHA 우선. 아니면 photo_id 키 (짧은 테스트 해시 호환)."""
+    s = (sha or "").strip().lower()
+    if len(s) == 64 and all(c in "0123456789abcdef" for c in s):
+        return s
+    return f"id:{int(photo_id)}"
+
+
+def _member_sha_rows(
+    conn: sqlite3.Connection, group_id: int, *, log_query: bool
+) -> list[sqlite3.Row]:
+    sql = """
+        SELECT m.photo_id, m.subgroup_key, m.is_subgroup_rep, m.is_representative,
+               lower(IFNULL(p.sha256, '')) AS sha
+        FROM similar_image_member m
+        JOIN photo_file p ON p.id = m.photo_id
+        WHERE m.group_id = ?
+        ORDER BY m.photo_id
+    """
+    rows = list(conn.execute(sql, (group_id,)).fetchall())
+    if log_query:
+        log.info(
+            "similar sha memory members sql=%s group_id=%s n=%s",
+            "SELECT photo_id, subgroup_key, sha256 FROM similar_image_member JOIN photo_file",
+            group_id,
+            len(rows),
+        )
+    return rows
+
+
+def _write_sha_memory_for_group(
+    conn: sqlite3.Connection,
+    group_id: int,
+    decision: str,
+    decided_by: str,
+    *,
+    log_query: bool = True,
+) -> None:
+    """
+    그룹 decision 을 SHA 장부에 반영.
+    deferred 는 해당 멤버 기억을 지운다(다시 검토). restore 호출부는 쓰지 않는다.
+    """
+    _apply_similar_sha_memory(conn)
+    rows = _member_sha_rows(conn, group_id, log_query=log_query)
+    if not rows:
+        return
+    keys = [_photo_sha_key(str(r["sha"]), int(r["photo_id"])) for r in rows]
+    if decision == "deferred":
+        sql = "DELETE FROM similar_sha_memory WHERE sha_key = ?"
+        for key in keys:
+            conn.execute(sql, (key,))
+        log.info(
+            "similar sha memory delete sql=%s group_id=%s members=%s",
+            sql.strip(),
+            group_id,
+            len(keys),
+        )
+        return
+
+    payloads: list[tuple[str, str, int, str]] = []
+    if decision == "different_content":
+        for key in keys:
+            payloads.append((key, key, 1, decided_by))
+    elif decision == "same_content":
+        rep_row = conn.execute(
+            "SELECT representative_photo_id FROM similar_image_group WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        rep_id = int(rep_row["representative_photo_id"] or 0) if rep_row else 0
+        rep_key = ""
+        for r, key in zip(rows, keys):
+            if int(r["photo_id"]) == rep_id or (
+                not rep_key and int(r["is_representative"] or 0)
+            ):
+                rep_key = key
+                if int(r["photo_id"]) == rep_id:
+                    break
+        if not rep_key:
+            rep_key = keys[0]
+        for key in keys:
+            payloads.append((key, rep_key, 0, decided_by))
+    elif decision == "partial":
+        buckets: dict[str, list[tuple[sqlite3.Row, str]]] = {}
+        for r, key in zip(rows, keys):
+            sg = str(r["subgroup_key"] or f"solo-{int(r['photo_id'])}")
+            buckets.setdefault(sg, []).append((r, key))
+        for mems in buckets.values():
+            if len(mems) >= 2:
+                rep = next(
+                    (pair for pair in mems if int(pair[0]["is_subgroup_rep"] or 0)),
+                    mems[0],
+                )
+                canon = rep[1]
+                for _row, key in mems:
+                    payloads.append((key, canon, 0, decided_by))
+            else:
+                key = mems[0][1]
+                payloads.append((key, key, 1, decided_by))
+    else:
+        return
+
+    conn.executemany(_SHA_MEMORY_UPSERT_SQL, payloads)
+    log.info(
+        "similar sha memory upsert sql=%s group_id=%s decision=%s members=%s by=%s",
+        "INSERT INTO similar_sha_memory ... ON CONFLICT UPDATE",
+        group_id,
+        decision,
+        len(payloads),
+        decided_by,
+    )
+
+
+def _backfill_sha_memory_from_groups(
+    conn: sqlite3.Connection, *, workspace_key: str
+) -> int:
+    """재클러스터 전에 확정 그룹 결정을 SHA 장부로 옮긴다."""
+    sql = """
+        SELECT id, decision
+        FROM similar_image_group
+        WHERE workspace_key = ? AND decision != 'deferred'
+    """
+    groups = conn.execute(sql, (workspace_key,)).fetchall()
+    log.info(
+        "similar sha memory backfill sql=%s workspace=%s groups=%s",
+        "SELECT id, decision FROM similar_image_group WHERE workspace_key=? AND decision!='deferred'",
+        workspace_key,
+        len(groups),
+    )
+    for g in groups:
+        _write_sha_memory_for_group(
+            conn,
+            int(g["id"]),
+            str(g["decision"]),
+            "backfill",
+            log_query=False,
+        )
+    return len(groups)
+
+
+def _fetch_sha_memory(
+    conn: sqlite3.Connection, keys: list[str]
+) -> dict[str, tuple[str, int]]:
+    if not keys:
+        return {}
+    uniq = list(dict.fromkeys(keys))
+    ph = ",".join("?" for _ in uniq)
+    sql = (
+        "SELECT sha_key, canonical_key, is_solo FROM similar_sha_memory "
+        f"WHERE sha_key IN ({ph})"
+    )
+    rows = conn.execute(sql, tuple(uniq)).fetchall()
+    return {
+        str(r["sha_key"]): (str(r["canonical_key"]), int(r["is_solo"] or 0))
+        for r in rows
+    }
+
+
+def _perceptual_distance(a: PhotoSig, b: PhotoSig) -> int | None:
+    try:
+        return min_perceptual_distance(a, b)
+    except ValueError:
+        return None
+
+
+def _insert_similar_shell(
+    conn: sqlite3.Connection,
+    *,
+    workspace_key: str,
+    group_key: str,
+    photo_ids: list[int],
+    max_distance: int,
+    representative_photo_id: int | None,
+    review_hint: str | None,
+) -> int:
+    """deferred 껍질 + 멤버. decision 복원은 set_similar_group_decision 이 이어서 한다."""
+    ids = [int(p) for p in photo_ids]
+    rep = (
+        int(representative_photo_id)
+        if representative_photo_id is not None and int(representative_photo_id) in ids
+        else ids[0]
+    )
+    cur = conn.execute(
+        """
+        INSERT INTO similar_image_group (
+          workspace_key, group_key, decision, representative_photo_id,
+          max_distance, member_count, created_at, updated_at
+        ) VALUES (?, ?, 'deferred', ?, ?, ?, datetime('now'), datetime('now'))
+        """,
+        (workspace_key, group_key, rep, max_distance, len(ids)),
+    )
+    gid = int(cur.lastrowid)
+    for pid in ids:
+        conn.execute(
+            """
+            INSERT INTO similar_image_member (group_id, photo_id, is_representative)
+            VALUES (?, ?, ?)
+            """,
+            (gid, pid, 1 if pid == rep else 0),
+        )
+    if review_hint:
+        conn.execute(
+            "UPDATE similar_image_group SET review_hint = ? WHERE id = ?",
+            (review_hint, gid),
+        )
+    return gid
+
+
+def _apply_known_partition(
+    conn: sqlite3.Connection,
+    group_id: int,
+    families: dict[str, list[dict[str, Any]]],
+    solos: list[dict[str, Any]],
+) -> None:
+    """장부에 있는 멤버만으로 same/different/partial 을 복원. 장부는 다시 쓰지 않는다."""
+    multi = {k: v for k, v in families.items() if len(v) >= 2}
+    singles: list[dict[str, Any]] = list(solos)
+    for members in families.values():
+        if len(members) < 2:
+            singles.extend(members)
+    if len(multi) == 1 and not singles:
+        canon, members = next(iter(multi.items()))
+        rep = next(
+            (int(m["photo_id"]) for m in members if m["sha_key"] == canon),
+            int(members[0]["photo_id"]),
+        )
+        set_similar_group_decision(
+            conn,
+            group_id=group_id,
+            decision="same_content",
+            representative_photo_id=rep,
+            decided_by="restore",
+        )
+        return
+    if not multi:
+        set_similar_group_decision(
+            conn,
+            group_id=group_id,
+            decision="different_content",
+            decided_by="restore",
+        )
+        return
+    subgroups: list[dict[str, Any]] = []
+    for i, (canon, members) in enumerate(multi.items(), start=1):
+        rep = next(
+            (int(m["photo_id"]) for m in members if m["sha_key"] == canon),
+            int(members[0]["photo_id"]),
+        )
+        subgroups.append(
+            {
+                "subgroup_key": f"mem-{i}",
+                "photo_ids": [int(m["photo_id"]) for m in members],
+                "representative_photo_id": rep,
+            }
+        )
+    for s in singles:
+        pid = int(s["photo_id"])
+        subgroups.append(
+            {
+                "photo_ids": [pid],
+                "representative_photo_id": pid,
+            }
+        )
+    set_similar_group_decision(
+        conn,
+        group_id=group_id,
+        decision="partial",
+        subgroups=subgroups,
+        decided_by="restore",
+    )
+
+
+def _materialize_cluster_from_sha_memory(
+    conn: sqlite3.Connection,
+    *,
+    workspace_key: str,
+    group_key: str,
+    photo_ids: list[int],
+    sig_by_id: dict[int, PhotoSig],
+    max_distance: int,
+) -> tuple[int, int]:
+    """
+    fingerprint 가 달라도 SHA 장부로 결정을 나눈다.
+    반환: (복원 그룹 수, 검토용 deferred 그룹 수)
+    """
+    built: list[dict[str, Any]] = []
+    for pid in photo_ids:
+        sig = sig_by_id.get(int(pid))
+        if sig is None:
+            continue
+        built.append(
+            {
+                "photo_id": int(pid),
+                "sha_key": _photo_sha_key(sig.sha256, int(pid)),
+                "sig": sig,
+            }
+        )
+    if len(built) < 2:
+        _insert_similar_shell(
+            conn,
+            workspace_key=workspace_key,
+            group_key=group_key,
+            photo_ids=list(photo_ids),
+            max_distance=max_distance,
+            representative_photo_id=photo_ids[0] if photo_ids else None,
+            review_hint=None,
+        )
+        return 0, 1
+
+    mem = _fetch_sha_memory(conn, [str(p["sha_key"]) for p in built])
+    unknown: list[dict[str, Any]] = []
+    families: dict[str, list[dict[str, Any]]] = {}
+    solos: list[dict[str, Any]] = []
+    for p in built:
+        hit = mem.get(str(p["sha_key"]))
+        if not hit:
+            unknown.append(p)
+            continue
+        canon, is_solo = hit
+        if is_solo:
+            solos.append(p)
+        else:
+            families.setdefault(canon, []).append(p)
+
+    if not unknown:
+        gid = _insert_similar_shell(
+            conn,
+            workspace_key=workspace_key,
+            group_key=group_key,
+            photo_ids=[int(p["photo_id"]) for p in built],
+            max_distance=max_distance,
+            representative_photo_id=int(built[0]["photo_id"]),
+            review_hint=None,
+        )
+        _apply_known_partition(conn, gid, families, solos)
+        return 1, 0
+
+    if not families and not solos:
+        _insert_similar_shell(
+            conn,
+            workspace_key=workspace_key,
+            group_key=group_key,
+            photo_ids=[int(p["photo_id"]) for p in built],
+            max_distance=max_distance,
+            representative_photo_id=int(built[0]["photo_id"]),
+            review_hint=None,
+        )
+        return 0, 1
+
+    restored = 0
+    extra_i = 0
+    for canon, members in families.items():
+        if len(members) < 2:
+            continue
+        extra_i += 1
+        ids = [int(m["photo_id"]) for m in members]
+        rep = next(
+            (int(m["photo_id"]) for m in members if m["sha_key"] == canon),
+            ids[0],
+        )
+        gid = _insert_similar_shell(
+            conn,
+            workspace_key=workspace_key,
+            group_key=f"{group_key}-k{extra_i}",
+            photo_ids=ids,
+            max_distance=max_distance,
+            representative_photo_id=rep,
+            review_hint=None,
+        )
+        set_similar_group_decision(
+            conn,
+            group_id=gid,
+            decision="same_content",
+            representative_photo_id=rep,
+            decided_by="restore",
+        )
+        restored += 1
+
+    def touches(photo: dict[str, Any]) -> bool:
+        for u in unknown:
+            dist = _perceptual_distance(photo["sig"], u["sig"])
+            if dist is not None and dist <= max_distance:
+                return True
+        return False
+
+    review: list[dict[str, Any]] = list(unknown)
+    seen = {int(p["photo_id"]) for p in review}
+    for canon, members in families.items():
+        if not any(touches(m) for m in members):
+            continue
+        rep = next((m for m in members if m["sha_key"] == canon), members[0])
+        pid = int(rep["photo_id"])
+        if pid not in seen:
+            review.append(rep)
+            seen.add(pid)
+    for solo in solos:
+        if not touches(solo):
+            continue
+        pid = int(solo["photo_id"])
+        if pid not in seen:
+            review.append(solo)
+            seen.add(pid)
+
+    if len(review) < 2:
+        best: dict[str, Any] | None = None
+        best_dist = 10**9
+        known = [p for p in built if p not in unknown]
+        for u in unknown:
+            for k in known:
+                dist = _perceptual_distance(u["sig"], k["sig"])
+                if dist is None or dist >= best_dist:
+                    continue
+                best_dist = dist
+                best = k
+        if best is not None and int(best["photo_id"]) not in seen:
+            review.append(best)
+            seen.add(int(best["photo_id"]))
+    if len(review) < 2:
+        for p in built:
+            pid = int(p["photo_id"])
+            if pid not in seen:
+                review.append(p)
+                seen.add(pid)
+                break
+
+    if len(review) >= 2:
+        # [변경사유]: 검토 화면의 대표 표시는 새 사진이 아니라 기존 대표로 둔다
+        known_rep = next((p for p in review if p not in unknown), review[0])
+        _insert_similar_shell(
+            conn,
+            workspace_key=workspace_key,
+            group_key=group_key,
+            photo_ids=[int(p["photo_id"]) for p in review],
+            max_distance=max_distance,
+            representative_photo_id=int(known_rep["photo_id"]),
+            review_hint=_REVIEW_DELTA_HINT,
+        )
+        return restored, 1
+    return restored, 0
+
+
 def _snapshot_non_deferred_decisions(
     conn: sqlite3.Connection, *, workspace_key: str
 ) -> dict[str, dict[str, Any]]:
@@ -291,6 +787,8 @@ def rebuild_similar_groups(
     from kakao_import.pipeline import normalize_room_ids, room_id_from_rel
 
     want = normalize_room_ids(room_ids)
+    # [변경사유]: SHA 장부·review_hint 컬럼 보장 후 결정 스냅샷
+    _apply_similar_sha_memory(conn)
     # [변경사유]: 재클러스터 전 non-deferred decision 보존 (스케줄 매일 detect 대비)
     preserved_all = _snapshot_non_deferred_decisions(conn, workspace_key=workspace_key)
     skip_row = conn.execute(
@@ -397,6 +895,8 @@ def rebuild_similar_groups(
 
     # [변경사유]: I4 — DELETE+INSERT 를 한 트랜잭션으로; 중간 실패 시 롤백해 빈 그룹 상태 방지
     try:
+        # [변경사유]: DELETE 전에 확정 decision 을 SHA 장부로 옮겨, 멤버가 바뀌어도 복원
+        _backfill_sha_memory_from_groups(conn, workspace_key=workspace_key)
         if want:
             if delete_group_ids:
                 gph = ",".join("?" for _ in delete_group_ids)
@@ -425,6 +925,8 @@ def rebuild_similar_groups(
 
         restored = 0
         restore_fail = 0
+        review_delta = 0
+        sig_by_id = {p.photo_id: p for p in photos}
         start_i = 1
         if want:
             import re
@@ -444,34 +946,35 @@ def rebuild_similar_groups(
 
         for i, c in enumerate(clusters, start=start_i):
             gkey = f"sg-{i:04d}"
-            cur = conn.execute(
-                """
-                INSERT INTO similar_image_group (
-                  workspace_key, group_key, decision, representative_photo_id,
-                  max_distance, member_count, created_at, updated_at
-                ) VALUES (?, ?, 'deferred', ?, ?, ?, datetime('now'), datetime('now'))
-                """,
-                (
-                    workspace_key,
-                    gkey,
-                    c.representative_photo_id,
-                    max_distance,
-                    len(c.photo_ids),
-                ),
-            )
-            gid = int(cur.lastrowid)
-            for pid in c.photo_ids:
-                conn.execute(
-                    """
-                    INSERT INTO similar_image_member (group_id, photo_id, is_representative)
-                    VALUES (?, ?, ?)
-                    """,
-                    (gid, pid, 1 if pid == c.representative_photo_id else 0),
-                )
             sha_fp = _member_fingerprint_sha(conn, c.photo_ids)
             id_fp = _member_fingerprint(c.photo_ids)
             snap = preserved.get(sha_fp) or preserved.get(id_fp)
+            # [변경사유]: 멤버 집합이 같으면 기존 스냅샷 복원. 다르면 SHA 장부로 대표만 다시 연다.
             if snap:
+                cur = conn.execute(
+                    """
+                    INSERT INTO similar_image_group (
+                      workspace_key, group_key, decision, representative_photo_id,
+                      max_distance, member_count, created_at, updated_at
+                    ) VALUES (?, ?, 'deferred', ?, ?, ?, datetime('now'), datetime('now'))
+                    """,
+                    (
+                        workspace_key,
+                        gkey,
+                        c.representative_photo_id,
+                        max_distance,
+                        len(c.photo_ids),
+                    ),
+                )
+                gid = int(cur.lastrowid)
+                for pid in c.photo_ids:
+                    conn.execute(
+                        """
+                        INSERT INTO similar_image_member (group_id, photo_id, is_representative)
+                        VALUES (?, ?, ?)
+                        """,
+                        (gid, pid, 1 if pid == c.representative_photo_id else 0),
+                    )
                 try:
                     _apply_restored_decision(conn, group_id=gid, snap=snap)
                     restored += 1
@@ -483,6 +986,18 @@ def rebuild_similar_groups(
                         str(exc)[:120],
                     )
                     restore_fail += 1
+                    review_delta += 1
+                continue
+            restored_n, delta_n = _materialize_cluster_from_sha_memory(
+                conn,
+                workspace_key=workspace_key,
+                group_key=gkey,
+                photo_ids=list(c.photo_ids),
+                sig_by_id=sig_by_id,
+                max_distance=max_distance,
+            )
+            restored += restored_n
+            review_delta += delta_n
     except Exception:
         log.exception(
             "similar rebuild aborted — rollback room=%s workspace=%s",
@@ -493,10 +1008,11 @@ def rebuild_similar_groups(
         raise
 
     log.info(
-        "similar rebuild restore restored=%s failed=%s new_deferred=%s preserved_keys=%s room=%s",
+        "similar rebuild restore restored=%s failed=%s new_deferred=%s review_delta=%s preserved_keys=%s room=%s",
         restored,
         restore_fail,
-        len(clusters) - restored,
+        review_delta,
+        review_delta,
         len(preserved),
         sorted(want) if want else None,
     )
@@ -512,6 +1028,7 @@ def rebuild_similar_groups(
         "decisions_restored": restored,
         "decisions_restore_failed": restore_fail,
         "decisions_preserved_keys": len(preserved),
+        "review_delta_groups": review_delta,
         "room_ids": sorted(want) if want else None,
     }
 
@@ -519,9 +1036,16 @@ def rebuild_similar_groups(
 
 def list_similar_groups(conn: sqlite3.Connection, *, workspace_key: str = "current") -> list[dict[str, Any]]:
     """그룹 요약 (로그/CLI). partial 시 subgroups 포함."""
+    # [변경사유]: review_hint 가 없는 기존 DB 만 보강. 매 조회마다 쓰지 않음
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(similar_image_group)").fetchall()
+    }
+    if cols and "review_hint" not in cols:
+        _apply_similar_sha_memory(conn)
     groups = conn.execute(
         """
-        SELECT id, group_key, decision, representative_photo_id, member_count, max_distance
+        SELECT id, group_key, decision, representative_photo_id, member_count,
+               max_distance, review_hint
         FROM similar_image_group
         WHERE workspace_key = ?
         ORDER BY id
@@ -563,6 +1087,7 @@ def list_similar_groups(conn: sqlite3.Connection, *, workspace_key: str = "curre
             "max_distance": int(g["max_distance"]),
             "members": member_list,
             "subgroups": _build_subgroups_view(member_list),
+            "review_hint": g["review_hint"],
         }
         out.append(item)
     return out
@@ -729,6 +1254,11 @@ def set_similar_group_decision(
         """,
         (d, rep, str(decided_by or "human"), group_id),
     )
+    # [변경사유]: restore 는 장부를 다시 쓰지 않음. 사람 결정·보류만 SHA 장부에 반영
+    if str(decided_by or "human") != "restore":
+        _write_sha_memory_for_group(
+            conn, group_id, d, str(decided_by or "human")
+        )
     return {
         "ok": True,
         "group_id": group_id,

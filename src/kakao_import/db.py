@@ -176,9 +176,14 @@ def init_schema(db_path: Path, *, reset: bool = False) -> None:
         # [변경사유]: 캡션 조회 인덱스 (기존 DB IF NOT EXISTS)
         ensure_caption_query_indexes(conn)
         # [변경사유]: I3 — similar decided_by/at (similar 테이블이 있을 때만)
-        from kakao_import.similar_detect import _apply_similar_decision_audit_columns
+        from kakao_import.similar_detect import (
+            _apply_similar_decision_audit_columns,
+            _apply_similar_sha_memory,
+        )
 
         _apply_similar_decision_audit_columns(conn)
+        # [변경사유]: similar SHA 결정 장부 — 멤버가 바뀌어도 리뷰 설정 유지
+        _apply_similar_sha_memory(conn)
         # [변경사유]: 포스터 분류 테이블 — exact_sha_member 와 분리
         ensure_poster_schema(conn)
         conn.commit()

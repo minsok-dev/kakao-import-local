@@ -13,7 +13,7 @@
 | 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지). 확정 비포스터는 import가 `non_posters/`로 옮긴다 |
 | 후속 | 수집 종료 시 `kakao-import run` + `similar-detect` **명시 호출** (폴더 watcher 아님) |
 
-관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md)
+관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [kakao-vs-band-collect-rules.md](./kakao-vs-band-collect-rules.md)
 
 ---
 

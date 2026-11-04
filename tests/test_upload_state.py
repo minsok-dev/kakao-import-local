@@ -211,8 +211,8 @@ def test_sync_upload_candidates_skips_uploaded_fingerprint(tmp_path: Path) -> No
         assert row["state_reason"] == "ledger_match"
 
 
-def test_sync_skips_when_caption_changes_but_media_on_ledger(tmp_path: Path) -> None:
-    """[변경사유]: I1 — 캡션 지문만 달라도 동일 미디어면 HTTP 재전송 안 함."""
+def test_sync_sends_caption_delta_when_media_on_ledger(tmp_path: Path) -> None:
+    """[변경사유]: 같은 파일이라도 문장 지문이 다르면 파일 없이 다시 보낸다."""
     root = tmp_path / "raw"
     root.mkdir()
     settings = _settings(tmp_path, root)
@@ -260,15 +260,15 @@ def test_sync_skips_when_caption_changes_but_media_on_ledger(tmp_path: Path) -> 
             }
         ],
     )
-    assert out["actionable_count"] == 0
-    assert out["skipped_uploaded_count"] == 1
+    assert out["actionable_count"] == 1
+    assert out["skipped_uploaded_count"] == 0
     with connect(settings.db_path) as conn:
         row = conn.execute(
             "SELECT state, state_reason FROM upload_candidate WHERE candidate_key = ?",
             (f"media:{media_fp}",),
         ).fetchone()
-    assert row["state"] == "uploaded"
-    assert row["state_reason"] in ("ledger_media_match", "keep_state:uploaded", "ledger_match")
+    assert row["state"] == "new"
+    assert row["state_reason"] == "caption_delta"
 
 
 def test_caption_plan_skips_ledger_source_sha(tmp_path: Path) -> None:

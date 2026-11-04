@@ -728,10 +728,18 @@ def build_upload_items(
     items: list[dict[str, Any]] = []
     caption_plan = load_incremental_caption_plan(settings.db_path)
     skip_shas: set[str] = set(caption_plan.get("skip_shas") or set())
+    # [변경사유]: 보류·비포스터는 새 문장이 있어도 열지 않는다
+    hard_skip_shas: set[str] = set(caption_plan.get("hard_skip_shas") or set())
+    ledger_caption_by_sha: dict[str, str] = dict(
+        caption_plan.get("ledger_caption_by_sha") or {}
+    )
     caption_cache: dict[str, str] = dict(caption_plan.get("caption_cache") or {})
+    # [변경사유]: 장부에 있고 거부되지 않은 SHA. 문장을 다시 만들어 지문이 다르면 caption-only
+    caption_delta_shas: set[str] = set()
     rebuilt = 0
     reused_cache = 0
     skipped_eval = 0
+    caption_delta_kept = 0
     skipped_room = 0
     skipped_unclassified = 0
     want = normalize_room_ids(room_ids)
@@ -792,8 +800,14 @@ def build_upload_items(
                 skipped_unclassified += 1
                 log.info("upload skip unclassified sha=%s rel=%s", sha[:12], rel_path)
                 continue
-            # [변경사유]: 이미 평가 완료(uploaded/hold/excluded)면 caption 재계산 생략
-            if sha in skip_shas:
+            # [변경사유]: 보류·비포스터·실패는 캡션을 다시 만들지 않는다
+            if sha in hard_skip_shas:
+                skipped_eval += 1
+                continue
+            # [변경사유]: 장부 SHA 는 문장을 다시 만든다. 장부에 없는 uploaded 후보는 그대로 스킵
+            if sha in ledger_caption_by_sha:
+                caption_delta_shas.add(sha)
+            elif sha in skip_shas:
                 skipped_eval += 1
                 continue
             photo_id = int(row["photo_id"])
@@ -895,9 +909,20 @@ def build_upload_items(
                 meta["similar"] = similar_map[pid]
             if pid in grouped_map:
                 meta["group_candidate"] = grouped_map[pid]
+        # [변경사유]: 이미 올린 SHA 의 새 문장은 앨범으로 합치지 않는다. 묶으면 caption-only 가 거절된다
+        delta_items = [
+            it
+            for it in items
+            if str(it.get("sha256") or "").strip().lower() in caption_delta_shas
+        ]
+        fresh_items = [
+            it
+            for it in items
+            if str(it.get("sha256") or "").strip().lower() not in caption_delta_shas
+        ]
         # [변경사유]: A+B — album stem 붕괴를 similar 앞에 두어 단건 쪼개짐·빈 캡션 방지
-        bundle_result = collapse_grouped_photo_bundles(items, client_id=client_id)
-        items = bundle_result["items"]
+        bundle_result = collapse_grouped_photo_bundles(fresh_items, client_id=client_id)
+        items = list(bundle_result["items"]) + delta_items
         policy_result = _apply_similar_policy(items, similar_map)
         items = policy_result["items"]
         # [변경사유]: same_content/partial 묶음 — 스킵 멤버 설명을 대표 본문에 union
@@ -940,6 +965,37 @@ def build_upload_items(
         # [변경사유]: union·묶음 이후 최종 캡션으로 멱등키 재계산
         for it in items:
             assign_item_idempotency(it)
+        # [변경사유]: 장부 캡션 지문과 같으면 보내지 않는다. 다르고 본문이 있으면 파일 없이 문장만
+        kept_items: list[dict[str, Any]] = []
+        for it in items:
+            sha = str(it.get("sha256") or "").strip().lower()
+            if sha not in caption_delta_shas:
+                kept_items.append(it)
+                continue
+            meta = it.get("_meta") if isinstance(it.get("_meta"), dict) else {}
+            texts = [
+                str(m.get("text") or "").strip()
+                for m in (it.get("matched_messages") or [])
+                if isinstance(m, dict)
+            ]
+            body = "\n".join(t for t in texts if t)
+            new_fp = str(meta.get("caption_fingerprint") or "").strip().lower()
+            old_fp = str(ledger_caption_by_sha.get(sha) or "").strip().lower()
+            if not body or is_attachment_marker_text(body) or (old_fp and new_fp == old_fp):
+                skipped_eval += 1
+                log.info(
+                    "caption-delta skip sha=%s reason=%s",
+                    sha[:12],
+                    "same" if old_fp and new_fp == old_fp else "empty",
+                )
+                continue
+            meta["caption_only"] = True
+            it["_meta"] = meta
+            it.pop("sub_images", None)
+            caption_delta_kept += 1
+            log.info("caption-delta keep sha=%s", sha[:12])
+            kept_items.append(it)
+        items = kept_items
         if limit is not None and len(items) > limit:
             items = items[:limit]
 
@@ -971,16 +1027,18 @@ def build_upload_items(
                 "skip_eval": skipped_eval,
                 "reused_cache": reused_cache,
                 "rebuilt_caption": rebuilt,
+                "caption_delta": caption_delta_kept,
                 "policy_skip_stats": policy_skip_stats,
             },
         }
 
     log.info(
-        "build_upload_items count=%s skip_eval=%s cache=%s rebuilt=%s skip_room=%s skip_unclassified=%s rooms=%s",
+        "build_upload_items count=%s skip_eval=%s cache=%s rebuilt=%s caption_delta=%s skip_room=%s skip_unclassified=%s rooms=%s",
         len(items),
         skipped_eval,
         reused_cache,
         rebuilt,
+        caption_delta_kept,
         skipped_room,
         skipped_unclassified,
         sorted(want) if want else None,
@@ -1027,6 +1085,9 @@ def build_batch_manifest(
             req["media_fingerprint"] = meta["media_fingerprint"]
         if meta.get("caption_fingerprint"):
             req["caption_fingerprint"] = meta["caption_fingerprint"]
+        # [변경사유]: 이미 올린 파일의 새 문장 — 매니페스트에 파일 없는 전송임을 남긴다
+        if meta.get("caption_only"):
+            req["caption_only"] = True
         if sub_rels:
             req["sub_file_rels"] = sub_rels
             req["sub_file_names"] = list(meta.get("sub_file_names") or [])

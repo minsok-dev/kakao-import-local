@@ -33,6 +33,8 @@ TERMINAL_SKIP_STATES = (
     "hold_manual_review",
     "failed_terminal",
 )
+# [변경사유]: 이미 올린 파일의 새 문장만 다시 연다. 보류·비포스터·실패는 열지 않는다
+HARD_SKIP_STATES = tuple(s for s in TERMINAL_SKIP_STATES if s != "uploaded")
 
 
 def _candidate_tables_exist(conn: sqlite3.Connection) -> bool:
@@ -233,6 +235,8 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
     out: dict[str, Any] = {
         "candidate_tables_exist": 0,
         "skip_shas": set(),
+        "hard_skip_shas": set(),
+        "ledger_caption_by_sha": {},
         "caption_cache": {},
         "skip_count": 0,
         "cache_count": 0,
@@ -257,6 +261,7 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
             """
         ).fetchall()
         skip_shas: set[str] = set()
+        hard_skip_shas: set[str] = set()
         caption_cache: dict[str, str] = {}
         for row in rows:
             sha = str(row["sha"] or "").strip().lower()
@@ -267,6 +272,9 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
                 continue
             state = str(row["state"] or "")
             cached = row["caption_text_cached"]
+            if state in HARD_SKIP_STATES:
+                # [변경사유]: similar 보류·비포스터·실패 SHA 는 캡션이 바뀌어도 재전송하지 않음
+                hard_skip_shas.add(sha)
             if state in TERMINAL_SKIP_STATES:
                 skip_shas.add(sha)
                 continue
@@ -279,12 +287,16 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
                 # [변경사유]: 미업로드라도 캐시가 있으면 caption SQL 재조립 생략
                 caption_cache[sha] = str(cached)
         out["skip_shas"] = skip_shas
+        out["hard_skip_shas"] = hard_skip_shas
         out["caption_cache"] = caption_cache
         # [변경사유]: I1 — 장부 source_sha256 기준 skip (bundle media_fp 와 exact sha 불일치 방지)
+        # [변경사유]: 거부되지 않은 장부 SHA 는 캡션 지문을 남겨, 문장이 바뀔 때만 caption-only 로 연다
+        ledger_caption_by_sha: dict[str, str] = {}
         try:
             ledger_rows = conn.execute(
                 """
-                SELECT lower(source_sha256) AS sha
+                SELECT lower(source_sha256) AS sha,
+                       lower(IFNULL(caption_fingerprint, '')) AS cap
                 FROM uploaded_sha_ledger
                 WHERE IFNULL(rejected, 0) = 0
                   AND length(IFNULL(source_sha256, '')) = 64
@@ -292,16 +304,22 @@ def load_incremental_caption_plan(db_path: Path) -> dict[str, Any]:
             ).fetchall()
             for row in ledger_rows:
                 sha = str(row["sha"] or "").strip().lower()
-                if len(sha) == 64 and sha not in caption_cache:
-                    skip_shas.add(sha)
+                if len(sha) != 64 or sha in caption_cache or sha in hard_skip_shas:
+                    continue
+                skip_shas.add(sha)
+                ledger_caption_by_sha[sha] = str(row["cap"] or "").strip().lower()
         except Exception:  # noqa: BLE001 — 구 스키마 무시
             pass
         out["skip_shas"] = skip_shas
+        out["hard_skip_shas"] = hard_skip_shas
+        out["ledger_caption_by_sha"] = ledger_caption_by_sha
         out["skip_count"] = len(skip_shas)
         out["cache_count"] = len(caption_cache)
     log.info(
-        "upload-state caption plan skip=%s cache=%s",
+        "upload-state caption plan skip=%s hard_skip=%s ledger_caption=%s cache=%s",
         out["skip_count"],
+        len(out["hard_skip_shas"]),
+        len(out["ledger_caption_by_sha"]),
         out["cache_count"],
     )
     return out
@@ -453,6 +471,12 @@ def sync_upload_candidates(
             )
             # [변경사유]: I1 — 미디어만 장부에 있어도 full HTTP 재전송 금지
             media_uploaded = is_uploaded_media_fingerprint(db_path, media_fp)
+            # [변경사유]: 같은 파일이고 문장 지문만 다르면 파일 재전송 없이 caption-only 대상
+            caption_delta = (
+                media_uploaded
+                and not ledger_uploaded
+                and len(caption_fp) == 64
+            )
             state = "new"
             state_reason = "new_candidate"
             if row:
@@ -465,12 +489,15 @@ def sync_upload_candidates(
                 elif not needs_rebuild and same_eval and current_state == "retry_wait":
                     state = "retry_wait"
                     state_reason = "keep_state:retry_wait"
+                elif not needs_rebuild and caption_delta:
+                    state = "new"
+                    state_reason = "caption_delta"
                 elif not needs_rebuild and (
                     ledger_uploaded
                     or media_uploaded
                     or current_state == "uploaded"
                 ):
-                    # [변경사유]: 캡션 지문이 달라도 동일 미디어면 uploaded 유지 (재업로드 HTTP 폭주 방지)
+                    # [변경사유]: 문장 지문이 같으면 uploaded 유지. 파일 재전송은 하지 않음
                     state = "uploaded"
                     state_reason = (
                         "ledger_match"
@@ -484,9 +511,18 @@ def sync_upload_candidates(
                 else:
                     state = "new"
                     state_reason = "candidate_changed"
+            elif caption_delta:
+                state = "new"
+                state_reason = "caption_delta"
             elif ledger_uploaded or media_uploaded:
                 state = "uploaded"
                 state_reason = "ledger_match" if ledger_uploaded else "ledger_media_match"
+            if state_reason == "caption_delta":
+                log.info(
+                    "upload-state caption delta candidate_key=%s sha_prefix=%s",
+                    candidate_key,
+                    media_fp[:12],
+                )
 
             conn.execute(
                 """

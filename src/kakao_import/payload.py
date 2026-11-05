@@ -90,13 +90,28 @@ def caption_fingerprint(matched_messages: list[Any] | None) -> str:
 
 
 def caption_fingerprint_without_sender_time(matched_messages: list[Any] | None) -> str:
-    """대화명 옆 시각을 뺀 지문. 예전 장부와 같으면 다시 보내지 않는다.
+    """장부에 남기는 본문 지문. 대화명 옆 시각은 빼서 해시한다.
 
-    [변경사유]: 시각을 대화명에 붙인 것만으로 기존 문장 지문이 바뀌어
-    이미 올린 사진이 전부 caption-delta 로 다시 나갔다.
+    [변경사유]: 시각은 나가는 문장에만 붙인다. 장부 지문에 넣으면
+    같은 본문이 바뀐 것으로 보여 이미 올린 사진이 다시 나간다.
     """
     plain = [strip_sender_time_label(part) for part in _caption_parts(matched_messages)]
     return hashlib.sha256("\n".join(plain).encode("utf-8")).hexdigest()
+
+
+def caption_matches_ledger(old_fp: str, matched_messages: list[Any] | None) -> bool:
+    """장부 지문이 이번 본문과 같으면 True. 같으면 다시 보내지 않는다.
+
+    [변경사유]: 앞으로의 장부는 시각 없는 본문 지문이다.
+    이미 시각이 포함된 지문으로 저장된 건도 같은 본문으로 인정한다.
+    """
+    old = str(old_fp or "").strip().lower()
+    if len(old) != 64:
+        return False
+    messages = matched_messages if isinstance(matched_messages, list) else []
+    identity = caption_fingerprint_without_sender_time(messages)
+    display = caption_fingerprint(messages)
+    return old == identity or old == display
 
 
 def media_fingerprint(main_sha: str, member_shas: list[str] | None = None) -> str:
@@ -119,11 +134,15 @@ def assign_item_idempotency(item: dict[str, Any]) -> None:
         if isinstance(s, dict):
             member.append(str(s.get("sha256") or "").strip().lower())
     media_fp = media_fingerprint(sha, member)
-    cap_fp = caption_fingerprint(item.get("matched_messages") if isinstance(item.get("matched_messages"), list) else [])
+    messages = item.get("matched_messages") if isinstance(item.get("matched_messages"), list) else []
+    # [변경사유]: 멱등키는 실제 전송 문장. 장부 지문은 시각을 뺀 본문만 남긴다
+    display_fp = caption_fingerprint(messages)
+    identity_fp = caption_fingerprint_without_sender_time(messages)
     meta = item.get("_meta") if isinstance(item.get("_meta"), dict) else {}
-    meta["idempotency_key"] = _idempotency_key(media_fp, cap_fp)
+    meta["idempotency_key"] = _idempotency_key(media_fp, display_fp)
     meta["media_fingerprint"] = media_fp
-    meta["caption_fingerprint"] = cap_fp
+    meta["caption_fingerprint"] = identity_fp
+    meta["caption_display_fingerprint"] = display_fp
     item["_meta"] = meta
 
 
@@ -997,13 +1016,10 @@ def build_upload_items(
                 if isinstance(m, dict)
             ]
             body = "\n".join(t for t in texts if t)
-            new_fp = str(meta.get("caption_fingerprint") or "").strip().lower()
             old_fp = str(ledger_caption_by_sha.get(sha) or "").strip().lower()
-            # [변경사유]: 대화명 옆 시각만 붙은 기존 문장은 장부 지문과 같은 것으로 본다
-            plain_fp = caption_fingerprint_without_sender_time(
-                it.get("matched_messages") if isinstance(it.get("matched_messages"), list) else []
-            )
-            same_caption = bool(old_fp) and (new_fp == old_fp or plain_fp == old_fp)
+            messages = it.get("matched_messages") if isinstance(it.get("matched_messages"), list) else []
+            # [변경사유]: 본문 지문이 같으면 시각을 붙여 다시 보내지 않는다
+            same_caption = caption_matches_ledger(old_fp, messages)
             if not body or is_attachment_marker_text(body) or same_caption:
                 skipped_eval += 1
                 log.info(

@@ -11,8 +11,10 @@ from kakao_import.payload import (
     MAX_UPLOAD_FILE_BYTES,
     _fingerprint_message,
     _idempotency_key,
+    assign_item_idempotency,
     caption_fingerprint,
     caption_fingerprint_without_sender_time,
+    caption_matches_ledger,
     ensure_client_instance_id,
     exceeds_ingress_limit,
     media_fingerprint,
@@ -48,6 +50,25 @@ def test_sender_time_does_not_change_legacy_caption_fingerprint() -> None:
     assert caption_fingerprint_without_sender_time(
         [{"text": newer}]
     ) != caption_fingerprint([{"text": legacy}])
+
+
+def test_ledger_stores_body_fingerprint_and_accepts_stamped_history() -> None:
+    # [변경사유]: 장부는 시각 없는 본문 지문. 이미 시각 포함으로 저장된 건도 같은 본문이다
+    legacy = "[대화명: 시남 필댄스]\n이번주 정모는 쉬어갑니당"
+    stamped = "[대화명: 시남 필댄스] [2026-09-26 19:10]\n이번주 정모는 쉬어갑니당"
+    newer = "[대화명: 시남 필댄스] [2026-09-26 19:10]\n이번주 정모는 쉬어갑니당\n추가 안내"
+    messages = [{"text": stamped}]
+    item = {"sha256": "a" * 64, "matched_messages": messages, "_meta": {}}
+    assign_item_idempotency(item)
+    identity = caption_fingerprint_without_sender_time(messages)
+    display = caption_fingerprint(messages)
+    assert item["_meta"]["caption_fingerprint"] == identity
+    assert item["_meta"]["caption_display_fingerprint"] == display
+    assert identity != display
+    assert caption_matches_ledger(caption_fingerprint([{"text": legacy}]), messages)
+    assert caption_matches_ledger(display, messages)
+    assert caption_matches_ledger(identity, messages) is True
+    assert caption_matches_ledger(caption_fingerprint([{"text": newer}]), messages) is False
 
 
 def test_media_fingerprint_bundle_order_independent() -> None:

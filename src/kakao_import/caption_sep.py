@@ -34,12 +34,25 @@ def format_room_header(title: str) -> str:
     return f"[단톡방: {title}]"
 
 
-def format_sender_header(sender: str) -> str:
-    """사진을 올린 카카오 대화명. 단톡방 제목 다음 줄."""
+def format_sent_at_label(sent_at: str | None) -> str:
+    """대화 시각을 [YYYY-MM-DD HH:MM] 안에 넣을 문자열. 없으면 빈 문자열."""
+    raw = str(sent_at or "").strip().replace("T", " ")
+    if len(raw) >= 16 and raw[4] == "-" and raw[7] == "-" and raw[10] == " ":
+        return raw[:16]
+    return ""
+
+
+def format_sender_header(sender: str, sent_at: str | None = None) -> str:
+    """사진을 올린 카카오 대화명. 시각이 있으면 같은 줄에 붙인다."""
     name = str(sender or "").strip()
     if not name:
         return ""
-    return f"[대화명: {name}]"
+    line = f"[대화명: {name}]"
+    # [변경사유]: 새로 붙는 문장의 대화 시각을 대화명 옆에 남긴다
+    label = format_sent_at_label(sent_at)
+    if label:
+        return f"{line} [{label}]"
+    return line
 
 
 def _first_sender(buf: list[dict[str, Any]]) -> str:
@@ -48,6 +61,15 @@ def _first_sender(buf: list[dict[str, Any]]) -> str:
         if name:
             return name
     return ""
+
+
+def _latest_sent_at(buf: list[dict[str, Any]]) -> str:
+    """방 묶음에서 가장 늦은 대화 시각. 신규 문장 시각으로 쓴다."""
+    times = [str(item.get("abs_time") or "").strip() for item in buf]
+    times = [t for t in times if t]
+    if not times:
+        return ""
+    return max(times)
 
 
 def _origin_header_block(buf: list[dict[str, Any]]) -> str:
@@ -67,7 +89,7 @@ def _origin_header_block(buf: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     if has_room_hint and title:
         lines.append(format_room_header(title))
-    sender_line = format_sender_header(sender)
+    sender_line = format_sender_header(sender, _latest_sent_at(buf))
     if sender_line:
         lines.append(sender_line)
     return "\n".join(lines)
@@ -159,6 +181,7 @@ def join_texts_by_room(
             "room_title": room_title,
             "chat_rel_path": chat_rel_path,
             "sender": sender,
+            "abs_time": p.get("abs_time"),
         }
         if room is None:
             if current_room is not object() and current_room is not None:

@@ -133,7 +133,17 @@
 
 사진이 두 장이면 앨범(`sub_images`)으로 합치지 않는다. SHA마다 caption-only 한 건이다. 묶어서 보내면 서버가 `CAPTION_ONLY_REQUIRES_FILE`(409)을 주고, 수집 PC가 파일을 다시 올린다. 11월 4일 SS라틴·카디즈는 SHA가 서로 다르므로 각 한 건이다. 다음 수집에서 그 문장이 두 글에 붙는다.
 
-서버 답은 그대로다. 글이 하나면 `sns_caption_text`만 갱신하고 `has_new_sns_content=1`이다. 본문 `content_text`와 날짜는 바꾸지 않는다. 글이 여러 개면 `exact 확인`. exact를 못 찾으면 409 뒤에 파일을 한 번 보낸다. 성공하면 장부 `caption_fingerprint`가 바뀌어 같은 문장은 다음 실행에서 다시 보내지 않는다. 매주반복 날짜 롤과 새 콘텐츠 생성은 이 수정에 없다.
+서버 답은 그대로다. 글이 하나면 `sns_caption_text`만 갱신하고 `has_new_sns_content=1`이다. 본문 `content_text`와 일정 날짜는 바꾸지 않는다. 새로 붙는 문장 앞에는 `ADD 구분선`을 넣고, 대화명 줄 끝에 그 대화가 온 시각(`YYYY-MM-DD HH:MM`)을 남긴다.
+
+```
+<------------- ADD 구분선 ------------>
+
+[단톡방: 홍대보니따 오픈채팅방 입니다♥ 참여코드 bonita9]
+[대화명: 이라 buenaonda.kr] [2026-11-04 11:28]
+안녕하세요! 라틴 문화 커뮤니티 부에나 온다(BUENA ONDA)입니다.
+```
+
+처음 등록되는 문장 앞에는 ADD 구분선을 붙이지 않는다. 대화 시각이 있으면 대화명 옆에 `YYYY-MM-DD HH:MM`으로 적는다. 이미 글이 있을 때 카카오 문장을 붙이면 그 앞에 ADD 구분선을 넣는다. 밴드 문장은 `---` 구분을 유지한다. 글이 여러 개면 `exact 확인`. exact를 못 찾으면 409 뒤에 파일을 한 번 보낸다. 성공하면 장부 `caption_fingerprint`가 바뀌어 같은 문장은 다음 실행에서 다시 보내지 않는다. 매주반복 날짜 롤과 새 콘텐츠 생성은 이 수정에 없다.
 
 ### 고친 파일
 
@@ -143,7 +153,10 @@
 | `src/kakao_import/upload_state.py` `load_incremental_caption_plan` | 보류·비포스터·실패는 `hard_skip_shas`. 거부되지 않은 장부는 `ledger_caption_by_sha`에 문장 지문을 남긴다 |
 | `src/kakao_import/upload_state.py` `sync_upload_candidates` | 문장 지문만 다르면 `uploaded`로 덮지 않는다. 이유는 `caption_delta` |
 | `src/kakao_import/upload.py` | 수정 없음. 목록에 들어온 한 장짜리 장부 SHA는 원래 파일 없이 보낸다 |
+| `src/kakao_import/caption_sep.py` | 대화명 줄 끝에 그 묶음의 대화 시각을 붙인다 |
+| `frontend/lib/ingest/exact/appendSnsCaption.ts` | 카카오 문장을 기존 글에 붙일 때 `---` 대신 ADD 구분선을 쓴다 |
 | `tests/test_upload_state.py` | 문장 지문이 달라진 장부 미디어는 전송 대상이 되는지로 바꿈 |
+| `tests/test_caption_sep.py` | 대화명 옆에 `2026-11-04 11:28` 형태가 있는지 확인 |
 
 `needs_rebuild=1`을 이미 올린 후보 전체에 켜지 않았다. 그러면 파일이 다시 올라간다.
 

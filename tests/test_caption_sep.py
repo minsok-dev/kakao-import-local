@@ -56,6 +56,23 @@ def test_join_before_after_uses_chat_split_not_add() -> None:
     assert f"\n\n{CHAT_SPLIT_SEPARATOR}\n\n" in raw
 
 
+def test_join_sender_line_includes_sent_at() -> None:
+    # [변경사유]: 새 문장을 붙일 때 대화명 옆에 대화 시각을 남긴다
+    raw = join_texts_by_room(
+        [
+            {
+                "chat_id": 1,
+                "room_title": "홍대보니따 오픈채팅방 입니다♥ 참여코드 bonita9",
+                "sender": "이라 buenaonda.kr",
+                "abs_time": "2026-11-04T11:28:00",
+                "body_raw": "안녕하세요! 라틴 문화 커뮤니티 부에나 온다(BUENA ONDA)입니다.",
+            }
+        ]
+    )
+    assert "[대화명: 이라 buenaonda.kr] [2026-11-04 11:28]" in raw
+    assert raw.startswith("[단톡방:")
+
+
 def test_join_includes_sender_and_empty_body_origin() -> None:
     # [변경사유]: 본문이 없어도 단톡방+대화명, 있으면 제목 아래 대화명
     with_body = join_texts_by_room(

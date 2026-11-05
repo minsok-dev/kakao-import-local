@@ -20,7 +20,11 @@ from kakao_import.caption_build import (
     compose_union_caption,
     similar_union_member_ids,
 )
-from kakao_import.caption_sep import CHAT_SPLIT_SEPARATOR, ROOM_ADD_SEPARATOR
+from kakao_import.caption_sep import (
+    CHAT_SPLIT_SEPARATOR,
+    ROOM_ADD_SEPARATOR,
+    strip_sender_time_label,
+)
 from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.photo_name import kakao_album_stem_and_seq
@@ -70,15 +74,29 @@ def _idempotency_key(media_fp: str, caption_fp: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def caption_fingerprint(matched_messages: list[Any] | None) -> str:
-    """캡션 지문. 날짜·본문은 유지하고 문자열만 이어 해시."""
+def _caption_parts(matched_messages: list[Any] | None) -> list[str]:
     parts: list[str] = []
     for m in matched_messages or []:
         if isinstance(m, dict):
             parts.append(str(m.get("text") or ""))
         else:
             parts.append(str(m or ""))
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return parts
+
+
+def caption_fingerprint(matched_messages: list[Any] | None) -> str:
+    """캡션 지문. 날짜·본문은 유지하고 문자열만 이어 해시."""
+    return hashlib.sha256("\n".join(_caption_parts(matched_messages)).encode("utf-8")).hexdigest()
+
+
+def caption_fingerprint_without_sender_time(matched_messages: list[Any] | None) -> str:
+    """대화명 옆 시각을 뺀 지문. 예전 장부와 같으면 다시 보내지 않는다.
+
+    [변경사유]: 시각을 대화명에 붙인 것만으로 기존 문장 지문이 바뀌어
+    이미 올린 사진이 전부 caption-delta 로 다시 나갔다.
+    """
+    plain = [strip_sender_time_label(part) for part in _caption_parts(matched_messages)]
+    return hashlib.sha256("\n".join(plain).encode("utf-8")).hexdigest()
 
 
 def media_fingerprint(main_sha: str, member_shas: list[str] | None = None) -> str:
@@ -981,12 +999,17 @@ def build_upload_items(
             body = "\n".join(t for t in texts if t)
             new_fp = str(meta.get("caption_fingerprint") or "").strip().lower()
             old_fp = str(ledger_caption_by_sha.get(sha) or "").strip().lower()
-            if not body or is_attachment_marker_text(body) or (old_fp and new_fp == old_fp):
+            # [변경사유]: 대화명 옆 시각만 붙은 기존 문장은 장부 지문과 같은 것으로 본다
+            plain_fp = caption_fingerprint_without_sender_time(
+                it.get("matched_messages") if isinstance(it.get("matched_messages"), list) else []
+            )
+            same_caption = bool(old_fp) and (new_fp == old_fp or plain_fp == old_fp)
+            if not body or is_attachment_marker_text(body) or same_caption:
                 skipped_eval += 1
                 log.info(
                     "caption-delta skip sha=%s reason=%s",
                     sha[:12],
-                    "same" if old_fp and new_fp == old_fp else "empty",
+                    "same" if same_caption else "empty",
                 )
                 continue
             meta["caption_only"] = True

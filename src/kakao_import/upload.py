@@ -363,6 +363,32 @@ def _cookie_from_env() -> str | None:
     return raw or None
 
 
+def prepare_upload_body_payload(
+    payload: dict[str, Any],
+    *,
+    caption_only: bool,
+) -> dict[str, Any]:
+    """전송 JSON. 파일 재전송이면 매니페스트의 caption_only 를 끈다.
+
+    [변경사유]: 문장을 붙일 곳이 없어 409가 난 뒤 파일을 다시 보낼 때도
+    payload.caption_only 가 남아 서버가 파일을 무시하고 같은 409를 냈다.
+    """
+    body_payload = {
+        k: v
+        for k, v in payload.items()
+        if k not in ("file_rel", "file_name", "sub_file_rels", "sub_file_names", "bundle")
+    }
+    if caption_only:
+        body_payload = {**body_payload, "caption_only": True}
+        item = body_payload.get("item")
+        if isinstance(item, dict) and item.get("sub_images"):
+            item = {**item, "sub_images": []}
+            body_payload = {**body_payload, "item": item}
+        return body_payload
+    body_payload.pop("caption_only", None)
+    return body_payload
+
+
 def upload_one(
     *,
     endpoint: str,
@@ -379,18 +405,7 @@ def upload_one(
     import uuid
 
     boundary = f"----kakaoImport{uuid.uuid4().hex}"
-    body_payload = {
-        k: v
-        for k, v in payload.items()
-        if k not in ("file_rel", "file_name", "sub_file_rels", "sub_file_names", "bundle")
-    }
-    # [변경사유]: 서버가 파일 없이 exact SNS append 하도록 표시
-    if caption_only:
-        body_payload = {**body_payload, "caption_only": True}
-        item = body_payload.get("item")
-        if isinstance(item, dict) and item.get("sub_images"):
-            item = {**item, "sub_images": []}
-            body_payload = {**body_payload, "item": item}
+    body_payload = prepare_upload_body_payload(payload, caption_only=caption_only)
     payload_bytes = json.dumps(body_payload, ensure_ascii=False).encode("utf-8")
     filename = file_path.name
 

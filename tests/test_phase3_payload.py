@@ -12,6 +12,7 @@ from kakao_import.payload import (
     _fingerprint_message,
     _idempotency_key,
     caption_fingerprint,
+    caption_fingerprint_without_sender_time,
     ensure_client_instance_id,
     exceeds_ingress_limit,
     media_fingerprint,
@@ -34,6 +35,19 @@ def test_idempotency_key_stable(tmp_path: Path, monkeypatch) -> None:
     assert k1 == hashlib.sha256(f"kakao:upload:v1:{media}:{cap}".encode()).hexdigest()
     # [변경사유]: photo_id 가 키에 들어가면 안 됨
     assert k1 != _idempotency_key(media, caption_fingerprint([{"text": "hello2"}]))
+
+
+def test_sender_time_does_not_change_legacy_caption_fingerprint() -> None:
+    # [변경사유]: 대화명 옆 시각만 붙은 문장은 예전 지문과 같아야 다시 보내지 않는다
+    legacy = "[대화명: 시남 필댄스]\n이번주 정모는 쉬어갑니당"
+    stamped = "[대화명: 시남 필댄스] [2026-09-26 19:10]\n이번주 정모는 쉬어갑니당"
+    assert caption_fingerprint([{"text": legacy}]) == caption_fingerprint_without_sender_time(
+        [{"text": stamped}]
+    )
+    newer = "[대화명: 시남 필댄스] [2026-09-26 19:10]\n이번주 정모는 쉬어갑니당\n추가 안내"
+    assert caption_fingerprint_without_sender_time(
+        [{"text": newer}]
+    ) != caption_fingerprint([{"text": legacy}])
 
 
 def test_media_fingerprint_bundle_order_independent() -> None:

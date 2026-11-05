@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # [변경사유]: 여러 방 텍스트 union 시 운영자가 구분할 수 있게
@@ -40,6 +41,21 @@ def format_sent_at_label(sent_at: str | None) -> str:
     if len(raw) >= 16 and raw[4] == "-" and raw[7] == "-" and raw[10] == " ":
         return raw[:16]
     return ""
+
+
+# [변경사유]: 대화명 줄에 붙인 시각. 예전 장부 지문과 비교할 때 이 꼬리만 뺀다
+_SENDER_TIME_SUFFIX_RE = re.compile(
+    r"^(\[대화명: [^\]]+\]) \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]$"
+)
+
+
+def strip_sender_time_label(text: str) -> str:
+    """대화명 줄 끝의 [YYYY-MM-DD HH:MM] 만 제거. 본문 날짜는 그대로 둔다."""
+    lines: list[str] = []
+    for line in str(text or "").split("\n"):
+        matched = _SENDER_TIME_SUFFIX_RE.match(line.strip())
+        lines.append(matched.group(1) if matched else line)
+    return "\n".join(lines)
 
 
 def format_sender_header(sender: str, sent_at: str | None = None) -> str:

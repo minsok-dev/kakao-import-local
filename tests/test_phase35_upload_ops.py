@@ -13,6 +13,7 @@ from kakao_import.upload import (
     cmd_upload,
     idle_after_upload_sec,
     matched_messages_nonempty,
+    prepare_upload_body_payload,
     resolve_upload_pace_sec,
     write_upload_result_json,
 )
@@ -30,6 +31,22 @@ def test_upload_pace_defaults_and_ocr_extra() -> None:
     assert idle_after_upload_sec(
         base_sleep_sec=0.0, ocr_extra_sec=5.0, response={"next": "ocr_queued"}
     ) == 5.0
+
+
+def test_file_retry_drops_caption_only_flag() -> None:
+    # [변경사유]: 409 후 파일 재전송은 caption_only 를 빼야 서버가 파일을 받는다
+    payload = {
+        "caption_only": True,
+        "item": {"sha256": "a" * 64, "sub_images": [{"sha256": "b" * 64}]},
+        "file_rel": "room/photos/a.png",
+    }
+    sent = prepare_upload_body_payload(payload, caption_only=False)
+    assert "caption_only" not in sent
+    assert sent["item"]["sub_images"]
+    assert "file_rel" not in sent
+    only = prepare_upload_body_payload(payload, caption_only=True)
+    assert only["caption_only"] is True
+    assert only["item"]["sub_images"] == []
 
 
 def test_matched_messages_nonempty() -> None:

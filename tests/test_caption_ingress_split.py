@@ -54,3 +54,16 @@ def test_no_separator_is_sliced_by_chars() -> None:
     msgs = matched_messages_from_caption(text)
     assert [len(m["text"]) for m in msgs] == [MAX_INGRESS_MESSAGE_CHARS, 50]
     assert "".join(m["text"] for m in msgs) == text
+
+
+def test_emoji_uses_utf16_length_like_the_server() -> None:
+    """이모지는 Python 1자 · 서버 2자. 서버 4,000을 넘기면 칸을 나눈다."""
+    # [변경사유]: 2026-11-08 MESSAGE_TOO_LONG — py 3906 / JS 4048
+    text = ("가" * 3900) + ("🙂" * 80)
+    assert len(text) <= MAX_INGRESS_MESSAGE_CHARS
+    msgs = matched_messages_from_caption(text)
+    assert len(msgs) >= 2
+    for m in msgs:
+        units = len(m["text"].encode("utf-16-le")) // 2
+        assert units <= MAX_INGRESS_MESSAGE_CHARS
+    assert "".join(m["text"] for m in msgs) == text

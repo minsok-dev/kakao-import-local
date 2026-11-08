@@ -156,16 +156,43 @@ def _fingerprint_message(sent_at: str, text: str) -> str:
     return hashlib.sha256(f"{sent_at}|{text}".encode()).hexdigest()
 
 
+def _ingress_units(text: str) -> int:
+    """서버(JS String.length)와 같은 UTF-16 코드 유닛 수.
+
+    [변경사유]: Python len 은 이모지 1자, 서버는 2자라
+    3,906자 메시지가 MESSAGE_TOO_LONG(4,000)으로 거절됐다.
+    """
+    return len((text or "").encode("utf-16-le")) // 2
+
+
+def _slice_ingress_units(text: str, limit: int) -> tuple[str, str]:
+    """앞에서 limit 유닛까지 자른다. 이모지(서로게이트 쌍)는 반으로 쪼개지 않는다."""
+    if limit <= 0 or not text:
+        return "", text or ""
+    if _ingress_units(text) <= limit:
+        return text, ""
+    used = 0
+    end = 0
+    for i, ch in enumerate(text):
+        units = 2 if ord(ch) > 0xFFFF else 1
+        if used + units > limit:
+            break
+        used += units
+        end = i + 1
+    return text[:end], text[end:]
+
+
 def _pieces_under_ingress_limit(text: str) -> list[str]:
     """
-    한 칸이 4,000자 이하면 그대로 둔다.
+    한 칸이 4,000자(UTF-16) 이하면 그대로 둔다.
     넘으면 ADD(방) → 채팅분리 → 글자 단위 순으로 나눈다.
     [변경사유]: 여러 방 글을 한 문자열로 붙이면 MESSAGE_TOO_LONG
+    [변경사유]: 상한은 서버 JS String.length(UTF-16) 기준
     """
     raw = (text or "").strip()
     if not raw:
         return []
-    if len(raw) <= MAX_INGRESS_MESSAGE_CHARS:
+    if _ingress_units(raw) <= MAX_INGRESS_MESSAGE_CHARS:
         return [raw]
 
     def _by_separator(blob: str, sep: str) -> list[str]:
@@ -174,33 +201,35 @@ def _pieces_under_ingress_limit(text: str) -> list[str]:
 
     pieces: list[str] = []
     for block in _by_separator(raw, ROOM_ADD_SEPARATOR):
-        if len(block) <= MAX_INGRESS_MESSAGE_CHARS:
+        if _ingress_units(block) <= MAX_INGRESS_MESSAGE_CHARS:
             pieces.append(block)
             continue
         for sub in _by_separator(block, CHAT_SPLIT_SEPARATOR):
-            if len(sub) <= MAX_INGRESS_MESSAGE_CHARS:
+            if _ingress_units(sub) <= MAX_INGRESS_MESSAGE_CHARS:
                 pieces.append(sub)
                 continue
             # [변경사유]: 구분선이 없는 한 덩어리도 칸 상한을 넘기면 글자로 자른다
             log.warning(
-                "caption chunked by chars len=%s limit=%s",
-                len(sub),
+                "caption chunked by chars units=%s limit=%s",
+                _ingress_units(sub),
                 MAX_INGRESS_MESSAGE_CHARS,
             )
-            for i in range(0, len(sub), MAX_INGRESS_MESSAGE_CHARS):
-                chunk = sub[i : i + MAX_INGRESS_MESSAGE_CHARS]
-                if chunk:
-                    pieces.append(chunk)
+            rest = sub
+            while rest:
+                head, rest = _slice_ingress_units(rest, MAX_INGRESS_MESSAGE_CHARS)
+                if not head:
+                    break
+                pieces.append(head)
     log.info(
-        "caption split for ingress chars=%s pieces=%s",
-        len(raw),
+        "caption split for ingress units=%s pieces=%s",
+        _ingress_units(raw),
         len(pieces),
     )
     return pieces
 
 
 def _cap_ingress_pieces(pieces: list[str]) -> list[str]:
-    """칸 수 40 · 합계 16,000자를 넘기면 뒤를 버린다."""
+    """칸 수 40 · 합계 16,000자(UTF-16)를 넘기면 뒤를 버린다."""
     kept: list[str] = []
     total = 0
     dropped = 0
@@ -212,13 +241,16 @@ def _cap_ingress_pieces(pieces: list[str]) -> list[str]:
         if room <= 0:
             dropped += 1
             continue
-        if len(piece) > room:
-            kept.append(piece[:room])
-            total += room
+        units = _ingress_units(piece)
+        if units > room:
+            head, _rest = _slice_ingress_units(piece, room)
+            if head:
+                kept.append(head)
+                total += _ingress_units(head)
             dropped += 1
             continue
         kept.append(piece)
-        total += len(piece)
+        total += units
     if dropped:
         log.warning(
             "caption ingress capped kept=%s dropped_pieces=%s total_chars=%s",

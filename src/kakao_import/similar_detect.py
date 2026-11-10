@@ -814,6 +814,22 @@ def rebuild_similar_groups(
     from kakao_import.poster_schema import excluded_poster_photo_ids
 
     skip_poster_ids = excluded_poster_photo_ids(conn)
+    # [변경사유]: 비포스터 id 를 재클러스터 목록에서 먼저 빼면, 그 사진만 비포스터가 된 그룹은
+    # 방 단위 삭제 조회에 안 걸려 카드가 남는다. 삭제 조회에만 그 번호를 남긴다.
+    excluded_in_room: set[int] = set()
+    if want and skip_poster_ids:
+        for r in rows:
+            pid = int(r["photo_id"])
+            if pid not in skip_poster_ids:
+                continue
+            if room_id_from_rel(str(r["rel_path"] or "")) in want:
+                excluded_in_room.add(pid)
+        if excluded_in_room:
+            log.info(
+                "similar room delete keeps non_poster ids rooms=%s photos=%s",
+                sorted(want),
+                len(excluded_in_room),
+            )
     if skip_poster_ids:
         rows = [r for r in rows if int(r["photo_id"]) not in skip_poster_ids]
         log.info("similar skip poster_non_poster photos=%s", len(skip_poster_ids))
@@ -825,9 +841,11 @@ def rebuild_similar_groups(
         log.info("similar room filter rooms=%s photos=%s", sorted(want), len(rows))
 
     room_photo_ids = {int(r["photo_id"]) for r in rows}
+    # [변경사유]: 다시 묶는 멤버는 비포스터를 빼고, 지울 그룹은 그 번호가 들어 있는 카드까지 포함한다.
+    delete_photo_ids = room_photo_ids | excluded_in_room
     delete_group_ids: list[int] = []
     if want:
-        if not room_photo_ids:
+        if not delete_photo_ids:
             log.info("similar room rebuild skip empty photos rooms=%s", sorted(want))
             return {
                 "ok": True,
@@ -844,7 +862,7 @@ def rebuild_similar_groups(
                 "room_ids": sorted(want),
                 "skipped_empty": True,
             }
-        ph = ",".join("?" for _ in room_photo_ids)
+        ph = ",".join("?" for _ in delete_photo_ids)
         g_rows = conn.execute(
             f"""
             SELECT DISTINCT m.group_id
@@ -852,9 +870,17 @@ def rebuild_similar_groups(
             JOIN similar_image_group g ON g.id = m.group_id
             WHERE g.workspace_key = ? AND m.photo_id IN ({ph})
             """,
-            (workspace_key, *sorted(room_photo_ids)),
+            (workspace_key, *sorted(delete_photo_ids)),
         ).fetchall()
         delete_group_ids = [int(r["group_id"]) for r in g_rows]
+        # [변경사유]: 방 단위 삭제 대상 — 비포스터 id 포함 여부를 로그로 남긴다
+        log.info(
+            "similar room delete targets groups=%s photos=%s non_poster=%s rooms=%s",
+            len(delete_group_ids),
+            len(delete_photo_ids),
+            len(excluded_in_room),
+            sorted(want),
+        )
         preserved: dict[str, Any] = {}
         for gid in delete_group_ids:
             mems = conn.execute(

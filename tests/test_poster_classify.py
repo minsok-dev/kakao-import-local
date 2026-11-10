@@ -233,6 +233,108 @@ def test_similar_skips_poster_non_poster(tmp_path: Path) -> None:
         conn.commit()
 
 
+def _photo(conn, rel: str, sha: str, dhash: str) -> int:
+    """서명까지 있는 사진 한 장."""
+    cur = conn.execute(
+        "INSERT INTO photo_file (rel_path, file_name, name_parse_ok, sha256) "
+        "VALUES (?, ?, 1, ?)",
+        (rel, rel.rsplit("/", 1)[-1], sha),
+    )
+    pid = int(cur.lastrowid)
+    conn.execute(
+        "INSERT INTO photo_signature (photo_id, algo_version, dhash_hex, phash_hex, source_sha256) "
+        "VALUES (?, 't', ?, ?, ?)",
+        (pid, dhash, dhash, sha),
+    )
+    return pid
+
+
+def _member_ids(conn) -> set[int]:
+    rows = conn.execute("SELECT photo_id FROM similar_image_member").fetchall()
+    return {int(r["photo_id"]) for r in rows}
+
+
+def test_room_rebuild_drops_group_whose_only_in_room_photo_is_non_poster(
+    tmp_path: Path,
+) -> None:
+    """그 방 멤버가 비포스터만 돼도 그룹을 지우고, 다른 방 그룹은 둔다."""
+    db = tmp_path / "s.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        poster = _photo(
+            conn,
+            "gyeonggi_latin_news/photos/poster.jpg",
+            "aa" * 32,
+            "0000000000000000",
+        )
+        stage = _photo(
+            conn,
+            "hongdae_bonita/non_posters/stage.jpg",
+            "bb" * 32,
+            "0000000000000001",
+        )
+        other_a = _photo(
+            conn, "other/photos/a.jpg", "cc" * 32, "ffffffffffffffff"
+        )
+        other_b = _photo(
+            conn, "other/photos/b.jpg", "dd" * 32, "fffffffffffffffe"
+        )
+        # [변경사유]: 아직 포스터로 묶인 뒤, 무대 사진만 비포스터가 된 상태를 만든다
+        rebuild_similar_groups(conn, max_distance=10)
+        assert {poster, stage} <= _member_ids(conn)
+        conn.execute(
+            """
+            INSERT INTO poster_classify (
+              room_id, photo_id, sha256, rel_path, file_name,
+              status, source, excluded_from_upload
+            ) VALUES ('hongdae_bonita', ?, ?, 'hongdae_bonita/non_posters/stage.jpg',
+                      'stage.jpg', 'non_poster', 'model', 1)
+            """,
+            (stage, "bb" * 32),
+        )
+        stats = rebuild_similar_groups(conn, max_distance=10, room_ids=["hongdae_bonita"])
+        conn.commit()
+        members = _member_ids(conn)
+        assert stage not in members
+        assert poster not in members
+        assert {other_a, other_b} <= members
+        assert stats["groups"] == 0
+        assert stats.get("skipped_empty") is not True
+
+
+def test_room_rebuild_reclusters_without_non_poster(tmp_path: Path) -> None:
+    """같은 방에 포스터가 남아 있으면 비포스터만 빼고 다시 묶는다."""
+    db = tmp_path / "s2.db"
+    init_schema(db)
+    with connect(db) as conn:
+        ensure_similar_schema(conn)
+        keep_a = _photo(conn, "hongdae_bonita/photos/a.jpg", "11" * 32, "0000000000000000")
+        keep_b = _photo(conn, "hongdae_bonita/photos/b.jpg", "22" * 32, "0000000000000001")
+        stage = _photo(
+            conn,
+            "hongdae_bonita/non_posters/stage.jpg",
+            "33" * 32,
+            "0000000000000003",
+        )
+        rebuild_similar_groups(conn, max_distance=10)
+        conn.execute(
+            """
+            INSERT INTO poster_classify (
+              room_id, photo_id, sha256, rel_path, file_name,
+              status, source, excluded_from_upload
+            ) VALUES ('hongdae_bonita', ?, ?, 'hongdae_bonita/non_posters/stage.jpg',
+                      'stage.jpg', 'non_poster', 'model', 1)
+            """,
+            (stage, "33" * 32),
+        )
+        stats = rebuild_similar_groups(conn, max_distance=10, room_ids=["hongdae_bonita"])
+        conn.commit()
+        assert _member_ids(conn) == {keep_a, keep_b}
+        assert stats["groups"] == 1
+        assert stats["skipped_poster"] == 1
+
+
 def test_classify_noop_without_active(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     init_schema(s.db_path)

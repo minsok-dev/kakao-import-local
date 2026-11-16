@@ -363,6 +363,15 @@ def _cookie_from_env() -> str | None:
     return raw or None
 
 
+def _collect_token_from_env() -> str | None:
+    """수집 전용 키. 쿠키보다 우선."""
+    raw = (
+        (os.getenv("INGEST_COLLECT_TOKEN") or "").strip()
+        or (os.getenv("KAKAO_IMPORT_COLLECT_TOKEN") or "").strip()
+    )
+    return raw or None
+
+
 def prepare_upload_body_payload(
     payload: dict[str, Any],
     *,
@@ -394,7 +403,7 @@ def upload_one(
     endpoint: str,
     payload: dict[str, Any],
     file_path: Path,
-    cookie: str,
+    cookie: str | None,
     timeout_sec: int = 60,
     sub_file_paths: list[Path] | None = None,
     caption_only: bool = False,
@@ -449,16 +458,22 @@ def upload_one(
     parts.append(f"--{boundary}--\r\n".encode())
     body = b"".join(parts)
 
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Origin": endpoint.rsplit("/api/", 1)[0] or endpoint,
+        "Referer": endpoint.rsplit("/api/", 1)[0] + "/",
+    }
+    # [변경사유]: 수집 전용 키 우선, 없으면 세션 쿠키
+    collect_token = _collect_token_from_env()
+    if collect_token:
+        headers["Authorization"] = f"Bearer {collect_token}"
+    if cookie:
+        headers["Cookie"] = cookie
     req = Request(
         endpoint,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Cookie": cookie,
-            "Origin": endpoint.rsplit("/api/", 1)[0] or endpoint,
-            "Referer": endpoint.rsplit("/api/", 1)[0] + "/",
-        },
+        headers=headers,
     )
     log.info(
         "upload_one sha_prefix=%s file=%s subs=%s caption_only=%s",
@@ -644,9 +659,10 @@ def cmd_upload(
         }
 
     cookie = _cookie_from_env()
-    if not cookie:
+    collect_token = _collect_token_from_env()
+    if not cookie and not collect_token:
         raise RuntimeError(
-            "실전송에는 KAKAO_IMPORT_SESSION_COOKIE 환경변수 필요 (파일 저장 금지)"
+            "실전송에는 INGEST_COLLECT_TOKEN 또는 KAKAO_IMPORT_SESSION_COOKIE 필요"
         )
     ep = (endpoint or os.getenv("KAKAO_IMPORT_ENDPOINT") or "").strip()
     if not ep:

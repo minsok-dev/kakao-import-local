@@ -305,4 +305,4 @@ Phase 1.5 폴더 watcher는 이후. 지금은 A 종료 시 import 호출.
 `kakao-pc-collect promo` 가 담당하고, 수집이 카카오 창을 잡는 시각과 겹치지 않게 따로 돌린다.
 
 말풍선은 공통 이미지 → 공통 문구 → 방별 바로가기 URL 이고, 방에 `image2` / `body2` / `url2` 가 있을 때만 그 순서로 이어 붙인다.  
-동작·파일 형식·단위 테스트 범위는 [promo-schedule.md](../../kakao-pc-collect/docs/promo-schedule.md).
+운영 절차는 [promo-operator-guide.md](../../kakao-pc-collect/docs/promo-operator-guide.md). 동작·단위 테스트 범위는 [promo-schedule.md](../../kakao-pc-collect/docs/promo-schedule.md).

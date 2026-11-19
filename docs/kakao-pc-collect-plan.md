@@ -3,6 +3,7 @@
 <!-- [변경사유]: 2026-08-17 — PC UI 준자동 수집 계약. UIA 한계·서랍 50칸·고정 다운로드 폴더 반영 -->
 <!-- [변경사유]: 2026-08-17 — 대화 txt: 검색→Enter→Ctrl+S→저장 실측 확정 -->
 <!-- [변경사유]: 2026-08-17 — 하이브리드 확정. 서랍 가상스크롤·다운로드 좌표 3곳·워터마크 중단 규칙 반영 -->
+<!-- [변경사유]: 2026-11-20 — 단톡 홍보는 수집과 별도 명령. 구현·테스트는 kakao-pc-collect -->
 
 | 항목 | 내용 |
 |------|------|
@@ -13,7 +14,8 @@
 | 산출물 | `input/raw/<room_id>/chats/*.txt` + `input/raw/<room_id>/photos/KakaoTalk_*` (원본 파일명·형식 유지). 확정 비포스터는 import가 `non_posters/`로 옮긴다 |
 | 후속 | 수집 종료 시 `kakao-import run` + `similar-detect` **명시 호출** (폴더 watcher 아님) |
 
-관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [kakao-vs-band-collect-rules.md](./kakao-vs-band-collect-rules.md)
+관련: [development-plan.md](./development-plan.md) · [phase0-contracts.md](./phase0-contracts.md) · [privacy-retention.md](./privacy-retention.md) · [similar-group-decisions.md](./similar-group-decisions.md) · [poster-classifier-plan.md](./poster-classifier-plan.md) · [kakao-vs-band-collect-rules.md](./kakao-vs-band-collect-rules.md)  
+단톡 홍보 예약(수집과 별도): [kakao-pc-collect/docs/promo-schedule.md](../../kakao-pc-collect/docs/promo-schedule.md)
 
 ---
 
@@ -292,3 +294,15 @@ Phase 1.5 폴더 watcher는 이후. 지금은 A 종료 시 import 호출.
 - [x] 도구 A 위치·CLI — `F:/site_kdance/TEST_web/kakao-pc-collect`, CLI `kakao-pc-collect`
 
 스파이크: 방 1개로 ①~⑤ + 복사 + `kakao-import run` 한 바퀴 (좌표 실측 후).
+
+---
+
+## 12. 단톡 홍보 예약 (수집과 별도)
+
+<!-- [변경사유]: 2026-11-20 — 완료 알림과 같은 PC 카톡 자동화. 수집 체인에는 붙이지 않는다 -->
+
+홍보 문구를 단톡에 넣는 일은 이 문서의 수집·import·upload 가 아니다.  
+`kakao-pc-collect promo` 가 담당하고, 수집이 카카오 창을 잡는 시각과 겹치지 않게 따로 돌린다.
+
+말풍선은 공통 이미지 → 공통 문구 → 방별 바로가기 URL 이고, 방에 `image2` / `body2` / `url2` 가 있을 때만 그 순서로 이어 붙인다.  
+동작·파일 형식·단위 테스트 범위는 [promo-schedule.md](../../kakao-pc-collect/docs/promo-schedule.md).

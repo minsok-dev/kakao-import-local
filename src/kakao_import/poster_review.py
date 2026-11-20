@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import sqlite3
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,7 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from kakao_import.config import Settings
-from kakao_import.db import connect
+from kakao_import.db import session
 from kakao_import.logging_util import get_logger
 from kakao_import.poster_label import cmd_poster_label
 from kakao_import.poster_schema import ensure_poster_schema, list_classify_rows
@@ -302,13 +303,14 @@ def create_handler(settings: Settings, root: Path):
     def ensure_schema_once() -> None:
         if schema_ready["ok"]:
             return
-        with connect(settings.db_path) as conn:
+        # [변경사유]: session 이 커밋 후 연결을 닫아 스키마 적용 중 파일 잠금을 남기지 않는다
+        with session(settings.db_path) as conn:
             ensure_poster_schema(conn)
-            conn.commit()
         schema_ready["ok"] = True
 
     def refresh_photo_paths() -> None:
-        with connect(settings.db_path) as conn:
+        with session(settings.db_path) as conn:
+            log.info("poster-review query photo_file paths")
             rows = conn.execute(
                 "SELECT id, rel_path FROM photo_file WHERE rel_path IS NOT NULL"
             ).fetchall()
@@ -317,6 +319,7 @@ def create_handler(settings: Settings, root: Path):
             p = resolve_photo_path(root, str(r["rel_path"]))
             if p is not None:
                 photo_paths[int(r["id"])] = p
+        log.info("poster-review photo paths rows=%s cached=%s", len(rows), len(photo_paths))
 
     def summary_of(items: list[dict[str, Any]]) -> dict[str, int]:
         out = {
@@ -381,14 +384,19 @@ def create_handler(settings: Settings, root: Path):
                 excluded_only = (qs.get("excluded_only") or [""])[0] in ("1", "true")
                 with db_lock:
                     ensure_schema_once()
-                    with connect(settings.db_path) as conn:
+                    with session(settings.db_path) as conn:
+                        log.info(
+                            "poster-review query items room=%s status=%s excluded_only=%s",
+                            room_id or "-",
+                            status or "-",
+                            excluded_only,
+                        )
                         items = list_classify_rows(
                             conn,
                             room_id=room_id,
                             status=status,
                             excluded_only=excluded_only,
                         )
-                    refresh_photo_paths()
                 self._json(200, {"ok": True, "items": items, "summary": summary_of(items)})
                 return
             if path.startswith("/photo/"):
@@ -400,7 +408,8 @@ def create_handler(settings: Settings, root: Path):
                 file_path = photo_paths.get(pid)
                 if file_path is None:
                     with db_lock:
-                        with connect(settings.db_path) as conn:
+                        with session(settings.db_path) as conn:
+                            log.info("poster-review query photo_file id=%s", pid)
                             row = conn.execute(
                                 "SELECT rel_path FROM photo_file WHERE id = ?",
                                 (pid,),
@@ -434,14 +443,23 @@ def create_handler(settings: Settings, root: Path):
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 self._json(400, {"ok": False, "error": f"bad payload: {exc}"})
                 return
-            with db_lock:
-                ensure_schema_once()
-                out = cmd_poster_label(
-                    settings,
-                    sha256=sha256,
-                    status=status,
-                    room_id=room_id,
-                )
+            # [변경사유]: 잠금이 나도 500 트레이스백 대신 JSON 을 돌려 "저장 중"에 남지 않게 한다
+            try:
+                with db_lock:
+                    ensure_schema_once()
+                    out = cmd_poster_label(
+                        settings,
+                        sha256=sha256,
+                        status=status,
+                        room_id=room_id,
+                    )
+                    # [변경사유]: 목록 조회마다 photo_file 전체를 잠그지 않고, 라벨로 경로가 바뀐 뒤에만 갱신
+                    if out.get("ok"):
+                        refresh_photo_paths()
+            except sqlite3.OperationalError as exc:
+                log.error("poster-review label sqlite error err=%s", exc)
+                self._json(503, {"ok": False, "error": str(exc)})
+                return
             self._json(200 if out.get("ok") else 400, out)
 
     return Handler

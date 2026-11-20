@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
-from kakao_import.db import connect
+from kakao_import.db import session
 from kakao_import.logging_util import get_logger
 from kakao_import.poster_const import SOURCE_HUMAN
 from kakao_import.poster_decision import excluded_flag
@@ -30,8 +31,41 @@ def cmd_poster_label(
         return {"ok": False, "error": f"bad status={status}"}
     if not settings.db_path.exists():
         return {"ok": False, "error": "db missing"}
-    with connect(settings.db_path) as conn:
+    # [변경사유]: 잠금 오류는 트레이스백 대신 ok=false 로 돌려 리뷰 UI가 멈추지 않게 한다
+    try:
+        updated, check = _write_human_label(settings, sha=sha, status=status, room_id=room_id)
+    except sqlite3.OperationalError as exc:
+        log.error("poster-label sqlite error sha=%s err=%s", sha[:12], exc)
+        return {"ok": False, "error": str(exc)}
+    if updated < 0:
+        return {"ok": False, "error": "photo_file sha not found"}
+    rebuild_count = mark_candidates_needs_rebuild_by_sha(
+        settings.db_path,
+        sha256=sha,
+        reason=f"poster_label:{status}",
+    )
+    return {
+        "ok": True,
+        "updated": updated,
+        "sha256": sha,
+        "status": status,
+        "row": check,
+        "rebuild_marked": rebuild_count,
+    }
+
+
+def _write_human_label(
+    settings,
+    *,
+    sha: str,
+    status: str,
+    room_id: str | None,
+) -> tuple[int, dict[str, Any] | None]:
+    """human 행을 저장하고 파일을 옮긴다. 사진이 없으면 updated=-1."""
+    with session(settings.db_path) as conn:
+        # [변경사유]: 스키마가 있으면 DDL 을 다시 실행하지 않는다 (ensure 내부에서 가드)
         ensure_poster_schema(conn)
+        log.info("poster-label query photo_file sha=%s", sha[:12])
         row = conn.execute(
             """
             SELECT id, rel_path, file_name, sha256
@@ -42,7 +76,7 @@ def cmd_poster_label(
             (sha,),
         ).fetchall()
         if not row:
-            return {"ok": False, "error": "photo_file sha not found"}
+            return -1, None
         updated = 0
         for r in row:
             rel = str(r["rel_path"] or "").replace("\\", "/")
@@ -86,16 +120,4 @@ def cmd_poster_label(
                 place_classified_photo(conn, root, int(r["id"]), rel, status)
         conn.commit()
         check = get_classify_row(conn, room_id or "", sha) if room_id else None
-    rebuild_count = mark_candidates_needs_rebuild_by_sha(
-        settings.db_path,
-        sha256=sha,
-        reason=f"poster_label:{status}",
-    )
-    return {
-        "ok": True,
-        "updated": updated,
-        "sha256": sha,
-        "status": status,
-        "row": check,
-        "rebuild_marked": rebuild_count,
-    }
+    return updated, check

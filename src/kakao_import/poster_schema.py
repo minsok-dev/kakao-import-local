@@ -14,6 +14,19 @@ log = get_logger(__name__)
 SCHEMA_SQL_POSTER = PROJECT_ROOT / "sql" / "007_poster_classify.sql"
 # [변경사유]: I6/B2 — dataset sync 이력
 SCHEMA_SQL_POSTER_SYNC = PROJECT_ROOT / "sql" / "010_poster_sync_log.sql"
+# [변경사유]: 이미 있으면 executescript(스키마 배타 잠금)를 다시 돌리지 않는다
+_POSTER_SCHEMA_OBJECTS = (
+    "poster_embedding",
+    "poster_classify",
+    "poster_model_meta",
+    "idx_poster_classify_sha",
+    "idx_poster_classify_excl",
+)
+_POSTER_SYNC_OBJECTS = (
+    "poster_sync_log",
+    "idx_poster_sync_log_sha",
+    "idx_poster_sync_log_at",
+)
 
 
 def poster_tables_exist(conn: sqlite3.Connection) -> bool:
@@ -24,16 +37,36 @@ def poster_tables_exist(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _schema_objects_exist(conn: sqlite3.Connection, names: tuple[str, ...]) -> bool:
+    """sqlite_master 에 테이블·인덱스가 모두 있는지. 없으면 스키마 적용이 필요하다."""
+    placeholders = ",".join("?" * len(names))
+    rows = conn.execute(
+        f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+        names,
+    ).fetchall()
+    have = {str(r[0]) for r in rows}
+    return set(names).issubset(have)
+
+
 def ensure_poster_schema(conn: sqlite3.Connection) -> None:
-    """007 적용 (이미 있으면 IF NOT EXISTS) + 010 sync_log."""
+    """007·010이 없을 때만 적용한다.
+
+    [변경사유]: 매 라벨마다 executescript 하면 schema_meta 쓰기·DDL 배타 잠금으로
+    database is locked 가 난다. 객체가 있으면 조회만 하고 끝낸다.
+    """
     if not SCHEMA_SQL_POSTER.is_file():
         log.warning("poster schema missing path=%s", SCHEMA_SQL_POSTER)
         return
-    sql = SCHEMA_SQL_POSTER.read_text(encoding="utf-8")
-    conn.executescript(sql)
-    log.info("init_schema sql=%s", SCHEMA_SQL_POSTER.name)
-    # [변경사유]: B2 — sync 이력 테이블 (IF NOT EXISTS)
-    if SCHEMA_SQL_POSTER_SYNC.is_file():
+    need_007 = not _schema_objects_exist(conn, _POSTER_SCHEMA_OBJECTS)
+    need_010 = SCHEMA_SQL_POSTER_SYNC.is_file() and not _schema_objects_exist(
+        conn, _POSTER_SYNC_OBJECTS
+    )
+    log.info("poster schema check apply007=%s apply010=%s", need_007, need_010)
+    if need_007:
+        conn.executescript(SCHEMA_SQL_POSTER.read_text(encoding="utf-8"))
+        log.info("init_schema sql=%s", SCHEMA_SQL_POSTER.name)
+    # [변경사유]: B2 — sync 이력 테이블. 007과 따로, 없을 때만 적용
+    if need_010:
         conn.executescript(SCHEMA_SQL_POSTER_SYNC.read_text(encoding="utf-8"))
         log.info("init_schema sql=%s", SCHEMA_SQL_POSTER_SYNC.name)
 

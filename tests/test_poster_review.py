@@ -121,3 +121,39 @@ def test_review_api_items_and_label(tmp_path: Path) -> None:
         assert int(row["excluded_from_upload"]) == 0
     finally:
         server.shutdown()
+
+
+def test_ensure_poster_schema_skips_ddl_while_reader_open(tmp_path: Path) -> None:
+    """스키마가 있으면 읽기 트랜잭션 중에도 executescript 로 잠금이 나지 않는다."""
+    root = tmp_path / "raw"
+    root.mkdir()
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+
+    reader = connect(settings.db_path)
+    # [변경사유]: 암시적 BEGIN 과 겹치지 않게 읽기 트랜잭션을 직접 연다
+    reader.isolation_level = None
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM poster_classify").fetchone()
+    writer = connect(settings.db_path)
+    try:
+        writer.execute("PRAGMA busy_timeout = 300")
+        ensure_poster_schema(writer)
+        writer.execute(
+            """
+            INSERT INTO poster_classify (
+              room_id, sha256, rel_path, file_name, status, source
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("room", "b" * 64, "room/photos/a.jpg", "a.jpg", "uncertain", "human"),
+        )
+        writer.commit()
+        left = writer.execute(
+            "SELECT COUNT(*) AS n FROM poster_classify WHERE room_id = ?",
+            ("room",),
+        ).fetchone()
+        assert int(left["n"]) == 1
+    finally:
+        writer.close()
+        reader.execute("ROLLBACK")
+        reader.close()

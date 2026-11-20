@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +37,43 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
-    try:
-        conn.execute("PRAGMA journal_mode = WAL")
-    except sqlite3.Error:
-        pass
+    # [변경사유]: 이미 WAL이면 journal_mode 재설정(배타 잠금)을 하지 않는다
+    _ensure_wal(conn, db_path)
     return conn
+
+
+def _ensure_wal(conn: sqlite3.Connection, db_path: Path) -> None:
+    """저널이 WAL이 아닐 때만 전환한다. 조회는 잠금을 잡지 않는다."""
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        mode = str(row[0]).lower() if row else ""
+        if mode == "wal":
+            return
+        conn.execute("PRAGMA journal_mode = WAL")
+        log.info("sqlite journal_mode=WAL db=%s prev=%s", db_path.name, mode or "-")
+    except sqlite3.Error:
+        log.warning("sqlite journal_mode wal skipped db=%s", db_path.name)
+
+
+@contextmanager
+def session(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """연결을 열고, 성공 시 커밋·실패 시 롤백한 뒤 닫는다.
+
+    [변경사유]: with connect()는 커밋만 하고 연결을 닫지 않아 파일 잠금이 남는다.
+    """
+    conn = connect(db_path)
+    try:
+        yield conn
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _apply_phase2b_columns(conn: sqlite3.Connection) -> None:

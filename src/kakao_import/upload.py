@@ -903,6 +903,13 @@ def cmd_upload(
                 fields = response_ledger_fields(resp)
                 rec_sha = fields.get("source_sha256") or source_sha
                 next_val = fields.get("next_val")
+                # [변경사유]: 글·OCR이 없는 임시 파일은 2xx. 장부를 지우거나 파일을 다시 보내지 않는다.
+                if next_val == "skipped_no_live_target":
+                    log.info(
+                        "caption-only skip no live target rel=%s sha_prefix=%s",
+                        rel,
+                        source_sha[:12],
+                    )
                 if rec_sha:
                     # [변경사유]: ocr_idx·거부·지문을 장부에 남겨 caption-only/재실행에 사용
                     record_uploaded_sha(

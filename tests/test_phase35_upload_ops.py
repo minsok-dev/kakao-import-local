@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kakao_import.config import Settings
 from kakao_import.upload import (
+    CAPTION_ONLY_FALLBACK_CODES,
     aggregate_upload_server_outcomes,
     build_upload_summary,
     classify_upload_requests,
@@ -47,6 +48,21 @@ def test_file_retry_drops_caption_only_flag() -> None:
     only = prepare_upload_body_payload(payload, caption_only=True)
     assert only["caption_only"] is True
     assert only["item"]["sub_images"] == []
+
+
+def test_no_live_target_is_not_a_file_fallback() -> None:
+    # [변경사유]: 글·OCR이 없는 2xx 는 장부를 지우거나 파일을 다시 보내지 않는다
+    assert "skipped_no_live_target" not in CAPTION_ONLY_FALLBACK_CODES
+    assert "CAPTION_ONLY_REQUIRES_FILE" in CAPTION_ONLY_FALLBACK_CODES
+    assert "CAPTION_ONLY_NO_EXACT" in CAPTION_ONLY_FALLBACK_CODES
+    assert (
+        idle_after_upload_sec(
+            base_sleep_sec=5.0,
+            ocr_extra_sec=5.0,
+            response={"next": "skipped_no_live_target"},
+        )
+        == 5.0
+    )
 
 
 def test_matched_messages_nonempty() -> None:

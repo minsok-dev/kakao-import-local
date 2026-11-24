@@ -49,16 +49,31 @@ def mark_candidates_needs_rebuild_by_sha(
     *,
     sha256: str,
     reason: str,
+    conn: sqlite3.Connection | None = None,
 ) -> int:
     """특정 SHA를 멤버로 가진 후보를 재평가 대상으로 표시."""
     sha = str(sha256 or "").strip().lower()
     if len(sha) != 64:
         return 0
-    with connect(db_path) as conn:
-        if not _candidate_tables_exist(conn):
-            return 0
-        cur = conn.execute(
-            """
+    # [변경사유]: 포스터 리뷰는 열린 연결을 넘겨 라벨마다 sqlite connect 를 다시 하지 않는다
+    if conn is not None:
+        return _mark_candidates_needs_rebuild_by_sha(conn, sha=sha, reason=reason)
+    with connect(db_path) as opened:
+        updated = _mark_candidates_needs_rebuild_by_sha(opened, sha=sha, reason=reason)
+        opened.commit()
+        return updated
+
+
+def _mark_candidates_needs_rebuild_by_sha(
+    conn: sqlite3.Connection,
+    *,
+    sha: str,
+    reason: str,
+) -> int:
+    """upload_candidate 재평가 표시. 호출 쪽에서 커밋한다."""
+    if not _candidate_tables_exist(conn):
+        return 0
+    sql = """
             UPDATE upload_candidate
             SET needs_rebuild = 1,
                 state = CASE
@@ -76,11 +91,10 @@ def mark_candidates_needs_rebuild_by_sha(
               FROM upload_candidate_member
               WHERE lower(IFNULL(sha256, '')) = ?
             )
-            """,
-            (reason, sha),
-        )
-        conn.commit()
-        updated = int(cur.rowcount or 0)
+            """
+    log.info("upload-state mark rebuild sql=%s sha_prefix=%s reason=%s", sql, sha[:12], reason)
+    cur = conn.execute(sql, (reason, sha))
+    updated = int(cur.rowcount or 0)
     log.info(
         "upload-state mark rebuild by sha sha_prefix=%s updated=%s reason=%s",
         sha[:12],

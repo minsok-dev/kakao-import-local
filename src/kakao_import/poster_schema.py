@@ -142,18 +142,14 @@ def get_classify_row(
     return dict(row) if row else None
 
 
-def list_classify_rows(
-    conn: sqlite3.Connection,
+def _classify_filters(
     *,
     room_id: str | None = None,
     status: str | None = None,
     source: str | None = None,
     excluded_only: bool = False,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    """포스터 분류 목록 조회 (브라우저 리뷰 UI용)."""
-    if not poster_tables_exist(conn):
-        return []
+) -> tuple[list[str], list[Any]]:
+    """poster_classify 목록·집계가 같은 WHERE 를 쓰게 한다."""
     where: list[str] = []
     params: list[Any] = []
     if room_id:
@@ -167,6 +163,84 @@ def list_classify_rows(
         params.append(source)
     if excluded_only:
         where.append("IFNULL(pc.excluded_from_upload, 0) = 1")
+    return where, params
+
+
+def summarize_classify_rows(
+    conn: sqlite3.Connection,
+    *,
+    room_id: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    excluded_only: bool = False,
+) -> dict[str, int]:
+    """필터에 맞는 건수. 페이지 목록과 별도로 집계한다."""
+    empty = {
+        "total": 0,
+        "poster": 0,
+        "uncertain": 0,
+        "non_poster": 0,
+        "excluded": 0,
+        "human": 0,
+    }
+    if not poster_tables_exist(conn):
+        return empty
+    where, params = _classify_filters(
+        room_id=room_id,
+        status=status,
+        source=source,
+        excluded_only=excluded_only,
+    )
+    sql = """
+        SELECT
+          COUNT(*) AS total,
+          IFNULL(SUM(CASE WHEN pc.status = 'poster' THEN 1 ELSE 0 END), 0) AS poster,
+          IFNULL(SUM(CASE WHEN pc.status = 'uncertain' THEN 1 ELSE 0 END), 0) AS uncertain,
+          IFNULL(SUM(CASE WHEN pc.status = 'non_poster' THEN 1 ELSE 0 END), 0) AS non_poster,
+          IFNULL(SUM(CASE WHEN IFNULL(pc.excluded_from_upload, 0) = 1 THEN 1 ELSE 0 END), 0)
+            AS excluded,
+          IFNULL(SUM(CASE WHEN pc.source = 'human' THEN 1 ELSE 0 END), 0) AS human
+        FROM poster_classify pc
+    """
+    if where:
+        sql += "\nWHERE " + " AND ".join(where)
+    log.info(
+        "poster-classify summarize sql=%s params=%s",
+        " ".join(sql.split()),
+        params,
+    )
+    row = conn.execute(sql, tuple(params)).fetchone()
+    if row is None:
+        return empty
+    return {
+        "total": int(row["total"] or 0),
+        "poster": int(row["poster"] or 0),
+        "uncertain": int(row["uncertain"] or 0),
+        "non_poster": int(row["non_poster"] or 0),
+        "excluded": int(row["excluded"] or 0),
+        "human": int(row["human"] or 0),
+    }
+
+
+def list_classify_rows(
+    conn: sqlite3.Connection,
+    *,
+    room_id: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    excluded_only: bool = False,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[dict[str, Any]]:
+    """포스터 분류 목록 조회 (브라우저 리뷰 UI용)."""
+    if not poster_tables_exist(conn):
+        return []
+    where, params = _classify_filters(
+        room_id=room_id,
+        status=status,
+        source=source,
+        excluded_only=excluded_only,
+    )
     sql = """
         SELECT
           pc.id,
@@ -189,5 +263,14 @@ def list_classify_rows(
     if limit is not None and limit > 0:
         sql += "\nLIMIT ?"
         params.append(limit)
+        # [변경사유]: 리뷰 UI 20장 페이지. OFFSET 은 LIMIT 과 같이만 쓴다
+        if offset is not None and offset > 0:
+            sql += " OFFSET ?"
+            params.append(offset)
+    log.info(
+        "poster-classify list sql=%s params=%s",
+        " ".join(sql.split()),
+        params,
+    )
     rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]

@@ -14,10 +14,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from kakao_import.config import Settings
-from kakao_import.db import session
+from kakao_import.db import connect
 from kakao_import.logging_util import get_logger
 from kakao_import.poster_label import cmd_poster_label
-from kakao_import.poster_schema import ensure_poster_schema, list_classify_rows
+from kakao_import.poster_schema import (
+    ensure_poster_schema,
+    list_classify_rows,
+    summarize_classify_rows,
+)
 from kakao_import.similar_detect import resolve_photo_path
 
 log = get_logger(__name__)
@@ -32,6 +36,13 @@ SOURCE_LABELS = {
     "human": "사람",
     "rule": "규칙",
 }
+
+# [변경사유]: 목록은 긴 변 400px JPEG 캐시. 원본은 라이트박스만
+THUMB_MAX_PX = 400
+THUMB_DIR_NAME = ".poster_review_thumbs"
+# [변경사유]: 한 번에 20장, 스크롤로 이어서 불러온다
+PAGE_SIZE = 20
+PAGE_SIZE_MAX = 100
 
 
 def _page_html() -> str:
@@ -103,6 +114,7 @@ def _page_html() -> str:
   .actions button { padding: 0.3rem 0.5rem; font-size: 0.78rem; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .status-line { min-height: 1.2em; font-size: 0.84rem; color: var(--accent); margin-top: 0.65rem; }
+  .sentinel { height: 1px; }
   .lightbox {
     display: none; position: fixed; inset: 0; z-index: 100; background: rgba(12,14,16,0.9);
     align-items: center; justify-content: center; padding: 1rem;
@@ -139,6 +151,7 @@ def _page_html() -> str:
 </header>
 <main>
   <div id="list" class="empty">불러오는 중…</div>
+  <div id="sentinel" class="sentinel" aria-hidden="true"></div>
 </main>
 <div id="lightbox" class="lightbox" aria-hidden="true">
   <img id="lb-img" alt=""/>
@@ -150,8 +163,14 @@ def _page_html() -> str:
 <script>
 const STATUS_LABELS = {poster:"포스터", uncertain:"불확실", non_poster:"비포스터"};
 const SOURCE_LABELS = {model:"모델", human:"사람", rule:"규칙"};
+const PAGE_SIZE = 20;
 let itemsCache = [];
+let lastSummary = {};
 let lightboxItem = null;
+let pageOffset = 0;
+let hasMore = false;
+let loadingPage = false;
+let listBound = false;
 
 function esc(v) {
   return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
@@ -167,19 +186,54 @@ function clsStatus(s) {
   return "status-" + String(s || "").replaceAll("_", "-");
 }
 
-async function load() {
-  const params = new URLSearchParams();
-  const status = document.getElementById("status-filter").value.trim();
-  const room = document.getElementById("room-filter").value.trim();
-  const excludedOnly = document.getElementById("excluded-only").checked;
-  if (status) params.set("status", status);
-  if (room) params.set("room_id", room);
-  if (excludedOnly) params.set("excluded_only", "1");
-  const res = await fetch("/api/items?" + params.toString());
-  const payload = await res.json();
-  itemsCache = payload.items || [];
-  renderSummary(payload.summary || {});
-  renderList(itemsCache);
+function currentFilters() {
+  return {
+    status: document.getElementById("status-filter").value.trim(),
+    room: document.getElementById("room-filter").value.trim(),
+    excludedOnly: document.getElementById("excluded-only").checked
+  };
+}
+
+function itemMatchesFilters(item) {
+  const f = currentFilters();
+  if (f.status && String(item.status || "") !== f.status) return false;
+  if (f.room && String(item.room_id || "") !== f.room) return false;
+  if (f.excludedOnly && Number(item.excluded_from_upload || 0) !== 1) return false;
+  return true;
+}
+
+function findCard(room, sha) {
+  return document.querySelector(
+    '.card[data-room="' + CSS.escape(String(room || "")) + '"][data-sha="' + CSS.escape(String(sha || "")) + '"]'
+  );
+}
+
+async function load(opts) {
+  const append = !!(opts && opts.append);
+  if (loadingPage) return;
+  loadingPage = true;
+  try {
+    const params = new URLSearchParams();
+    const f = currentFilters();
+    if (f.status) params.set("status", f.status);
+    if (f.room) params.set("room_id", f.room);
+    if (f.excludedOnly) params.set("excluded_only", "1");
+    params.set("limit", String(PAGE_SIZE));
+    params.set("offset", String(append ? itemsCache.length : 0));
+    const res = await fetch("/api/items?" + params.toString());
+    const payload = await res.json();
+    const items = payload.items || [];
+    lastSummary = payload.summary || {};
+    hasMore = !!payload.has_more;
+    if (append) itemsCache = itemsCache.concat(items);
+    else itemsCache = items;
+    pageOffset = itemsCache.length;
+    renderSummary(lastSummary);
+    if (append) appendCards(items);
+    else renderList(itemsCache);
+  } finally {
+    loadingPage = false;
+  }
 }
 
 function renderSummary(summary) {
@@ -204,13 +258,23 @@ function renderList(items) {
   }
   root.className = "grid";
   root.innerHTML = items.map(renderCard).join("");
-  bindCardEvents();
+}
+
+function appendCards(items) {
+  if (!items.length) return;
+  const root = document.getElementById("list");
+  if (root.className !== "grid") {
+    renderList(itemsCache);
+    return;
+  }
+  root.insertAdjacentHTML("beforeend", items.map(renderCard).join(""));
 }
 
 function renderCard(item) {
-  const img = item.photo_id ? `<img class="thumb" src="/photo/${item.photo_id}" alt="${esc(item.file_name)}" data-open-photo="${item.photo_id}"/>` : `<div class="empty">이미지 없음</div>`;
+  const key = esc(item.room_id) + "\\t" + esc(item.sha256);
+  const img = item.photo_id ? `<img class="thumb" src="/thumb/${item.photo_id}" alt="${esc(item.file_name)}" loading="lazy" data-open-photo="${item.photo_id}"/>` : `<div class="empty">이미지 없음</div>`;
   const excluded = Number(item.excluded_from_upload || 0) === 1;
-  return `<section class="card">
+  return `<section class="card" data-card-key="${key}" data-room="${esc(item.room_id)}" data-sha="${esc(item.sha256)}">
     ${img}
     <div class="body">
       <div><span class="badge ${clsStatus(item.status)}">${esc(STATUS_LABELS[item.status] || item.status)}</span></div>
@@ -233,39 +297,85 @@ function renderCard(item) {
   </section>`;
 }
 
-function bindCardEvents() {
-  document.querySelectorAll("[data-label]").forEach(btn => {
-    btn.addEventListener("click", async (e) => {
-      const b = e.currentTarget;
-      const payload = {
-        room_id: b.getAttribute("data-room"),
-        sha256: b.getAttribute("data-sha"),
-        status: b.getAttribute("data-label")
-      };
-      const statusId = "status-" + payload.room_id + "-" + payload.sha256;
-      const line = document.getElementById(statusId);
-      if (line) line.textContent = "저장 중…";
-      const res = await fetch("/api/label", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(payload)
-      });
-      const out = await res.json();
-      if (line) line.textContent = out.ok ? "저장됨: human/" + payload.status : ("오류: " + (out.error || "save failed"));
-      if (out.ok) await load();
-    });
+function bumpSummary(prev, next, removed) {
+  const s = lastSummary;
+  const prevStatus = String(prev.status || "");
+  const nextStatus = String(next.status || "");
+  if (prevStatus && s[prevStatus] != null) s[prevStatus] = Math.max(0, Number(s[prevStatus] || 0) - 1);
+  if (nextStatus && s[nextStatus] != null) s[nextStatus] = Number(s[nextStatus] || 0) + 1;
+  const prevEx = Number(prev.excluded_from_upload || 0) === 1;
+  const nextEx = Number(next.excluded_from_upload || 0) === 1;
+  if (prevEx && !nextEx) s.excluded = Math.max(0, Number(s.excluded || 0) - 1);
+  if (!prevEx && nextEx) s.excluded = Number(s.excluded || 0) + 1;
+  if (String(prev.source || "") !== "human" && String(next.source || "") === "human") {
+    s.human = Number(s.human || 0) + 1;
+  }
+  if (removed) s.total = Math.max(0, Number(s.total || 0) - 1);
+  renderSummary(s);
+}
+
+async function onListClick(e) {
+  const img = e.target.closest("[data-open-photo]");
+  if (img && document.getElementById("list").contains(img)) {
+    const pid = Number(img.getAttribute("data-open-photo"));
+    const item = itemsCache.find(x => Number(x.photo_id || 0) === pid) || null;
+    if (!item) return;
+    lightboxItem = item;
+    document.getElementById("lb-img").src = "/photo/" + pid;
+    document.getElementById("lb-caption").textContent = (item.room_id || "") + " / " + (item.file_name || "");
+    document.getElementById("lightbox").classList.add("open");
+    return;
+  }
+  const b = e.target.closest("[data-label]");
+  if (!b || !document.getElementById("list").contains(b)) return;
+  const payload = {
+    room_id: b.getAttribute("data-room"),
+    sha256: b.getAttribute("data-sha"),
+    status: b.getAttribute("data-label")
+  };
+  const statusId = "status-" + payload.room_id + "-" + payload.sha256;
+  const line = document.getElementById(statusId);
+  if (line) line.textContent = "저장 중…";
+  const res = await fetch("/api/label", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(payload)
   });
-  document.querySelectorAll("[data-open-photo]").forEach(img => {
-    img.addEventListener("click", (e) => {
-      const pid = Number(e.currentTarget.getAttribute("data-open-photo"));
-      const item = itemsCache.find(x => Number(x.photo_id || 0) === pid) || null;
-      if (!item) return;
-      lightboxItem = item;
-      document.getElementById("lb-img").src = "/photo/" + pid;
-      document.getElementById("lb-caption").textContent = (item.room_id || "") + " / " + (item.file_name || "");
-      document.getElementById("lightbox").classList.add("open");
-    });
+  const out = await res.json();
+  if (!out.ok) {
+    if (line) line.textContent = "오류: " + (out.error || "save failed");
+    return;
+  }
+  const idx = itemsCache.findIndex(x => String(x.room_id) === payload.room_id && String(x.sha256) === payload.sha256);
+  const prev = idx >= 0 ? itemsCache[idx] : {};
+  const next = Object.assign({}, prev, out.row || {}, {
+    status: payload.status,
+    source: "human",
+    excluded_from_upload: payload.status === "non_poster" ? 1 : 0
   });
+  const keep = itemMatchesFilters(next);
+  bumpSummary(prev, next, !keep);
+  if (!keep) {
+    if (idx >= 0) itemsCache.splice(idx, 1);
+    const card = findCard(payload.room_id, payload.sha256);
+    if (card) card.remove();
+    if (!itemsCache.length) {
+      if (hasMore) await load({append: true});
+      else renderList(itemsCache);
+    } else if (hasMore && itemsCache.length < PAGE_SIZE) {
+      await load({append: true});
+    }
+    return;
+  }
+  if (idx >= 0) itemsCache[idx] = next;
+  else itemsCache.push(next);
+  const card = findCard(payload.room_id, payload.sha256);
+  if (card) {
+    card.outerHTML = renderCard(next);
+    const fresh = findCard(payload.room_id, payload.sha256);
+    const freshLine = fresh ? fresh.querySelector(".status-line") : null;
+    if (freshLine) freshLine.textContent = "저장됨: human/" + payload.status;
+  }
 }
 
 function closeLightbox() {
@@ -274,9 +384,20 @@ function closeLightbox() {
   lightboxItem = null;
 }
 
-document.getElementById("btn-reload").addEventListener("click", load);
-document.getElementById("btn-apply").addEventListener("click", load);
-document.getElementById("excluded-only").addEventListener("change", load);
+function bindListOnce() {
+  if (listBound) return;
+  listBound = true;
+  document.getElementById("list").addEventListener("click", (e) => {
+    onListClick(e).catch(err => {
+      const line = e.target.closest(".card") && e.target.closest(".card").querySelector(".status-line");
+      if (line) line.textContent = "오류: " + err;
+    });
+  });
+}
+
+document.getElementById("btn-reload").addEventListener("click", () => load());
+document.getElementById("btn-apply").addEventListener("click", () => load());
+document.getElementById("excluded-only").addEventListener("change", () => load());
 document.getElementById("lb-close").addEventListener("click", closeLightbox);
 document.getElementById("lightbox").addEventListener("click", (e) => {
   if (e.target.id === "lightbox") closeLightbox();
@@ -284,6 +405,14 @@ document.getElementById("lightbox").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeLightbox();
 });
+bindListOnce();
+if ("IntersectionObserver" in window) {
+  const io = new IntersectionObserver((entries) => {
+    if (!entries.some(en => en.isIntersecting)) return;
+    if (hasMore) load({append: true});
+  }, {rootMargin: "400px"});
+  io.observe(document.getElementById("sentinel"));
+}
 load().catch(err => {
   const root = document.getElementById("list");
   root.className = "empty";
@@ -294,54 +423,123 @@ load().catch(err => {
 </html>"""
 
 
+def _parse_page_int(raw: str | None, default: int, *, lo: int, hi: int) -> int:
+    """쿼리 숫자를 범위 안으로 맞춘다."""
+    if raw is None or raw == "":
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def _thumb_cache_fresh(src: Path, dest: Path) -> bool:
+    """원본보다 캐시가 같거나 더 최근이면 재생성하지 않는다."""
+    if not dest.is_file():
+        return False
+    try:
+        return dest.stat().st_mtime >= src.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _make_thumb_jpeg(src: Path, dest: Path, *, max_px: int = THUMB_MAX_PX) -> bool:
+    """긴 변 max_px JPEG 를 dest 에 쓴다. Pillow 없거나 실패면 False."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        log.warning("poster-review thumb skip no Pillow path=%s", src.name)
+        return False
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(src) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            im.thumbnail((max_px, max_px))
+            tmp = dest.with_suffix(".tmp.jpg")
+            im.save(tmp, "JPEG", quality=82, optimize=True)
+            tmp.replace(dest)
+        log.info("poster-review thumb wrote id_name=%s bytes=%s", dest.name, dest.stat().st_size)
+        return True
+    except OSError as exc:
+        log.warning("poster-review thumb fail path=%s err=%s", src, exc)
+        return False
+
+
 def create_handler(settings: Settings, root: Path):
     """RequestHandler 클래스 팩토리."""
     photo_paths: dict[int, Path] = {}
     db_lock = threading.Lock()
     schema_ready = {"ok": False}
+    thumb_root = Path(root) / THUMB_DIR_NAME
+    # [변경사유]: 요청마다 sqlite connect 하지 않고 리뷰 서버 수명 동안 연결 1개
+    review_conn = connect(settings.db_path, check_same_thread=False)
+
+    def close_resources() -> None:
+        try:
+            review_conn.close()
+        except sqlite3.Error:
+            pass
 
     def ensure_schema_once() -> None:
         if schema_ready["ok"]:
             return
-        # [변경사유]: session 이 커밋 후 연결을 닫아 스키마 적용 중 파일 잠금을 남기지 않는다
-        with session(settings.db_path) as conn:
-            ensure_poster_schema(conn)
+        ensure_poster_schema(review_conn)
+        review_conn.commit()
         schema_ready["ok"] = True
 
-    def refresh_photo_paths() -> None:
-        with session(settings.db_path) as conn:
-            log.info("poster-review query photo_file paths")
-            rows = conn.execute(
-                "SELECT id, rel_path FROM photo_file WHERE rel_path IS NOT NULL"
-            ).fetchall()
-        photo_paths.clear()
-        for r in rows:
-            p = resolve_photo_path(root, str(r["rel_path"]))
-            if p is not None:
-                photo_paths[int(r["id"])] = p
-        log.info("poster-review photo paths rows=%s cached=%s", len(rows), len(photo_paths))
+    def resolve_photo_file(pid: int) -> Path | None:
+        """photo_id 경로. 전체 photo_file 스캔 없이 한 건만 조회한다."""
+        cached = photo_paths.get(pid)
+        if cached is not None and cached.is_file():
+            return cached
+        with db_lock:
+            cached = photo_paths.get(pid)
+            if cached is not None and cached.is_file():
+                return cached
+            ensure_schema_once()
+            sql = "SELECT rel_path FROM photo_file WHERE id = ?"
+            log.info("poster-review query photo_file id=%s sql=%s", pid, sql)
+            row = review_conn.execute(sql, (pid,)).fetchone()
+            if not row:
+                return None
+            resolved = resolve_photo_path(root, str(row["rel_path"]))
+            if resolved is None:
+                return None
+            photo_paths[pid] = resolved
+            return resolved
 
-    def summary_of(items: list[dict[str, Any]]) -> dict[str, int]:
-        out = {
-            "total": len(items),
-            "poster": 0,
-            "uncertain": 0,
-            "non_poster": 0,
-            "excluded": 0,
-            "human": 0,
-        }
-        for item in items:
-            status = str(item.get("status") or "")
-            if status in out:
-                out[status] += 1
-            if int(item.get("excluded_from_upload") or 0) == 1:
-                out["excluded"] += 1
-            if str(item.get("source") or "") == "human":
-                out["human"] += 1
-        return out
+    def cache_photo_path_from_row(row: Any) -> None:
+        """라벨 후 옮긴 경로만 메모리에 반영한다. photo_file 전체는 다시 읽지 않는다."""
+        if not isinstance(row, dict):
+            return
+        try:
+            pid = int(row.get("photo_id") or 0)
+        except (TypeError, ValueError):
+            return
+        rel = row.get("rel_path")
+        if not pid or not rel:
+            return
+        resolved = resolve_photo_path(root, str(rel))
+        if resolved is not None:
+            photo_paths[pid] = resolved
+        else:
+            photo_paths.pop(pid, None)
+
+    def thumb_bytes(pid: int, file_path: Path) -> tuple[bytes, str]:
+        """캐시 JPEG 또는 원본. DB 잠금 밖에서 디스크만 다룬다."""
+        dest = thumb_root / f"{pid}.jpg"
+        if _thumb_cache_fresh(file_path, dest):
+            return dest.read_bytes(), "image/jpeg"
+        if _make_thumb_jpeg(file_path, dest):
+            return dest.read_bytes(), "image/jpeg"
+        data = file_path.read_bytes()
+        ctype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        return data, ctype
 
     ensure_schema_once()
-    refresh_photo_paths()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
@@ -382,48 +580,67 @@ def create_handler(settings: Settings, root: Path):
                 room_id = (qs.get("room_id") or [""])[0].strip() or None
                 status = (qs.get("status") or [""])[0].strip() or None
                 excluded_only = (qs.get("excluded_only") or [""])[0] in ("1", "true")
+                limit = _parse_page_int(
+                    (qs.get("limit") or [""])[0], PAGE_SIZE, lo=1, hi=PAGE_SIZE_MAX
+                )
+                offset = _parse_page_int(
+                    (qs.get("offset") or [""])[0], 0, lo=0, hi=1_000_000
+                )
                 with db_lock:
                     ensure_schema_once()
-                    with session(settings.db_path) as conn:
-                        log.info(
-                            "poster-review query items room=%s status=%s excluded_only=%s",
-                            room_id or "-",
-                            status or "-",
-                            excluded_only,
-                        )
-                        items = list_classify_rows(
-                            conn,
-                            room_id=room_id,
-                            status=status,
-                            excluded_only=excluded_only,
-                        )
-                self._json(200, {"ok": True, "items": items, "summary": summary_of(items)})
+                    log.info(
+                        "poster-review query items room=%s status=%s excluded_only=%s limit=%s offset=%s",
+                        room_id or "-",
+                        status or "-",
+                        excluded_only,
+                        limit,
+                        offset,
+                    )
+                    summary = summarize_classify_rows(
+                        review_conn,
+                        room_id=room_id,
+                        status=status,
+                        excluded_only=excluded_only,
+                    )
+                    items = list_classify_rows(
+                        review_conn,
+                        room_id=room_id,
+                        status=status,
+                        excluded_only=excluded_only,
+                        limit=limit,
+                        offset=offset,
+                    )
+                has_more = offset + len(items) < int(summary.get("total") or 0)
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "items": items,
+                        "summary": summary,
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": has_more,
+                    },
+                )
                 return
-            if path.startswith("/photo/"):
+            if path.startswith("/photo/") or path.startswith("/thumb/"):
                 try:
                     pid = int(path.rsplit("/", 1)[-1])
                 except ValueError:
                     self._json(400, {"ok": False, "error": "bad photo id"})
                     return
-                file_path = photo_paths.get(pid)
-                if file_path is None:
-                    with db_lock:
-                        with session(settings.db_path) as conn:
-                            log.info("poster-review query photo_file id=%s", pid)
-                            row = conn.execute(
-                                "SELECT rel_path FROM photo_file WHERE id = ?",
-                                (pid,),
-                            ).fetchone()
-                        if row:
-                            resolved = resolve_photo_path(root, str(row["rel_path"]))
-                            if resolved is not None:
-                                photo_paths[pid] = resolved
-                                file_path = resolved
+                file_path = resolve_photo_file(pid)
                 if file_path is None or not file_path.is_file():
                     self._json(404, {"ok": False, "error": "file missing"})
                     return
-                data = file_path.read_bytes()
-                ctype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                if path.startswith("/thumb/"):
+                    data, ctype = thumb_bytes(pid, file_path)
+                else:
+                    data = file_path.read_bytes()
+                    ctype = (
+                        mimetypes.guess_type(file_path.name)[0]
+                        or "application/octet-stream"
+                    )
                 self._send(200, data, ctype, cache="public, max-age=3600")
                 return
             self._json(404, {"ok": False, "error": "not found"})
@@ -452,16 +669,18 @@ def create_handler(settings: Settings, root: Path):
                         sha256=sha256,
                         status=status,
                         room_id=room_id,
+                        conn=review_conn,
                     )
-                    # [변경사유]: 목록 조회마다 photo_file 전체를 잠그지 않고, 라벨로 경로가 바뀐 뒤에만 갱신
+                    # [변경사유]: 라벨로 경로가 바뀐 한 건만 캐시한다. photo_file 전체 SELECT 없음
                     if out.get("ok"):
-                        refresh_photo_paths()
+                        cache_photo_path_from_row(out.get("row"))
             except sqlite3.OperationalError as exc:
                 log.error("poster-review label sqlite error err=%s", exc)
                 self._json(503, {"ok": False, "error": str(exc)})
                 return
             self._json(200 if out.get("ok") else 400, out)
 
+    Handler.close_resources = staticmethod(close_resources)  # type: ignore[attr-defined]
     return Handler
 
 
@@ -491,3 +710,6 @@ def run_review_server(
         print("\nstopped")
     finally:
         server.server_close()
+        close_fn = getattr(handler, "close_resources", None)
+        if callable(close_fn):
+            close_fn()

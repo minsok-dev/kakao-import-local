@@ -22,6 +22,7 @@ def cmd_poster_label(
     sha256: str,
     status: str,
     room_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """human 확정. non_poster 는 non_posters 로, 그 외는 photos 로 파일을 맞춘다."""
     sha = sha256.strip().lower()
@@ -33,17 +34,24 @@ def cmd_poster_label(
         return {"ok": False, "error": "db missing"}
     # [변경사유]: 잠금 오류는 트레이스백 대신 ok=false 로 돌려 리뷰 UI가 멈추지 않게 한다
     try:
-        updated, check = _write_human_label(settings, sha=sha, status=status, room_id=room_id)
+        updated, check = _write_human_label(
+            settings, sha=sha, status=status, room_id=room_id, conn=conn
+        )
     except sqlite3.OperationalError as exc:
         log.error("poster-label sqlite error sha=%s err=%s", sha[:12], exc)
         return {"ok": False, "error": str(exc)}
     if updated < 0:
         return {"ok": False, "error": "photo_file sha not found"}
+    # [변경사유]: 리뷰 서버가 넘긴 연결이면 후보 재평가도 같은 연결에서 한다
     rebuild_count = mark_candidates_needs_rebuild_by_sha(
         settings.db_path,
         sha256=sha,
         reason=f"poster_label:{status}",
+        conn=conn,
     )
+    # [변경사유]: 재사용한 연결은 mark 이후에도 커밋해야 수집 프로세스가 재평가 플래그를 본다
+    if conn is not None:
+        conn.commit()
     return {
         "ok": True,
         "updated": updated,
@@ -60,35 +68,51 @@ def _write_human_label(
     sha: str,
     status: str,
     room_id: str | None,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[int, dict[str, Any] | None]:
     """human 행을 저장하고 파일을 옮긴다. 사진이 없으면 updated=-1."""
-    with session(settings.db_path) as conn:
-        # [변경사유]: 스키마가 있으면 DDL 을 다시 실행하지 않는다 (ensure 내부에서 가드)
-        ensure_poster_schema(conn)
-        log.info("poster-label query photo_file sha=%s", sha[:12])
-        row = conn.execute(
-            """
+    # [변경사유]: 리뷰 서버 연결 재사용. 없으면 기존처럼 session 으로 열고 닫는다
+    if conn is not None:
+        return _write_human_label_on(conn, settings, sha=sha, status=status, room_id=room_id)
+    with session(settings.db_path) as opened:
+        return _write_human_label_on(
+            opened, settings, sha=sha, status=status, room_id=room_id
+        )
+
+
+def _write_human_label_on(
+    conn: sqlite3.Connection,
+    settings,
+    *,
+    sha: str,
+    status: str,
+    room_id: str | None,
+) -> tuple[int, dict[str, Any] | None]:
+    """이미 열린 연결에 human 행을 쓴다."""
+    # [변경사유]: 스키마가 있으면 DDL 을 다시 실행하지 않는다 (ensure 내부에서 가드)
+    ensure_poster_schema(conn)
+    photo_sql = """
             SELECT id, rel_path, file_name, sha256
             FROM photo_file
             WHERE lower(sha256) = ?
             ORDER BY id
-            """,
-            (sha,),
-        ).fetchall()
-        if not row:
-            return -1, None
-        updated = 0
-        for r in row:
-            rel = str(r["rel_path"] or "").replace("\\", "/")
-            from kakao_import.pipeline import room_id_from_rel
+            """
+    log.info("poster-label query photo_file sha=%s sql=%s", sha[:12], photo_sql)
+    row = conn.execute(photo_sql, (sha,)).fetchall()
+    if not row:
+        return -1, None
+    updated = 0
+    for r in row:
+        rel = str(r["rel_path"] or "").replace("\\", "/")
+        from kakao_import.pipeline import room_id_from_rel
 
-            rid = room_id or room_id_from_rel(rel)
-            if room_id and rid != room_id:
-                continue
-            name = str(r["file_name"] or "")
-            excl = excluded_flag(status)
-            conn.execute(
-                """
+        rid = room_id or room_id_from_rel(rel)
+        if room_id and rid != room_id:
+            continue
+        name = str(r["file_name"] or "")
+        excl = excluded_flag(status)
+        conn.execute(
+            """
                 INSERT INTO poster_classify (
                   room_id, photo_id, sha256, rel_path, file_name,
                   model_version, poster_score, status, source, excluded_from_upload, classified_at
@@ -102,22 +126,22 @@ def _write_human_label(
                   excluded_from_upload = excluded.excluded_from_upload,
                   classified_at = datetime('now')
                 """,
-                (rid, int(r["id"]), sha, rel, name, status, SOURCE_HUMAN, excl),
-            )
-            updated += 1
-            log.info(
-                "poster-label human room=%s sha=%s status=%s excl=%s",
-                rid,
-                sha[:12],
-                status,
-                excl,
-            )
-            # [변경사유]: 사람 라벨 직후 실제 파일을 상태 폴더로 옮긴다
-            root = settings.export_root
-            if root is not None:
-                from kakao_import.poster_place import place_classified_photo
+            (rid, int(r["id"]), sha, rel, name, status, SOURCE_HUMAN, excl),
+        )
+        updated += 1
+        log.info(
+            "poster-label human room=%s sha=%s status=%s excl=%s",
+            rid,
+            sha[:12],
+            status,
+            excl,
+        )
+        # [변경사유]: 사람 라벨 직후 실제 파일을 상태 폴더로 옮긴다
+        root = settings.export_root
+        if root is not None:
+            from kakao_import.poster_place import place_classified_photo
 
-                place_classified_photo(conn, root, int(r["id"]), rel, status)
-        conn.commit()
-        check = get_classify_row(conn, room_id or "", sha) if room_id else None
+            place_classified_photo(conn, root, int(r["id"]), rel, status)
+    conn.commit()
+    check = get_classify_row(conn, room_id or "", sha) if room_id else None
     return updated, check

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +36,12 @@ def test_page_html_mentions_human_label() -> None:
     assert "Poster 분류 리뷰" in html
     assert "human" in html.lower()
     assert "non_poster" in html
+    # [변경사유]: 목록은 썸네일·lazy·20장 페이지. 저장 후 전체 load() 금지
+    assert 'src="/thumb/${item.photo_id}"' in html
+    assert 'loading="lazy"' in html
+    assert "PAGE_SIZE = 20" in html
+    assert "if (out.ok) await load()" not in html
+    assert 'src = "/photo/" + pid' in html
 
 
 def test_review_api_items_and_label(tmp_path: Path) -> None:
@@ -80,7 +88,7 @@ def test_review_api_items_and_label(tmp_path: Path) -> None:
     t.start()
     sleep(0.05)
     try:
-        conn_h = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn_h = HTTPConnection("127.0.0.1", port, timeout=8)
         conn_h.request("GET", "/api/items")
         payload = json.loads(conn_h.getresponse().read().decode("utf-8"))
         assert payload["ok"] is True
@@ -119,8 +127,21 @@ def test_review_api_items_and_label(tmp_path: Path) -> None:
         assert row["status"] == "poster"
         assert row["source"] == "human"
         assert int(row["excluded_from_upload"]) == 0
+        assert payload.get("has_more") is False
+        assert payload.get("limit") == 20
+        conn_h.request("GET", f"/thumb/{pid}")
+        thumb_res = conn_h.getresponse()
+        assert thumb_res.status == 200
+        thumb_res.read()
+        conn_h.request("GET", f"/photo/{pid}")
+        photo_res = conn_h.getresponse()
+        assert photo_res.status == 200
+        photo_res.read()
     finally:
         server.shutdown()
+        close_fn = getattr(handler, "close_resources", None)
+        if callable(close_fn):
+            close_fn()
 
 
 def test_ensure_poster_schema_skips_ddl_while_reader_open(tmp_path: Path) -> None:
@@ -157,3 +178,142 @@ def test_ensure_poster_schema_skips_ddl_while_reader_open(tmp_path: Path) -> Non
         writer.close()
         reader.execute("ROLLBACK")
         reader.close()
+
+
+def test_review_api_paginates_twenty(tmp_path: Path) -> None:
+    """한 요청에 20장만 주고 has_more 로 나머지를 이어서 받는다."""
+    root = tmp_path / "raw"
+    photos = root / "info_latin_korea" / "photos"
+    photos.mkdir(parents=True)
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    with connect(settings.db_path) as conn:
+        ensure_poster_schema(conn)
+        for i in range(21):
+            name = f"p{i:02d}.jpg"
+            (photos / name).write_bytes(b"fake-image")
+            sha = f"{i:064x}"
+            pid = conn.execute(
+                "INSERT INTO photo_file (rel_path,file_name,name_parse_ok,sha256) VALUES (?,?,1,?)",
+                (f"info_latin_korea/photos/{name}", name, sha),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO poster_classify (
+                  room_id, photo_id, sha256, rel_path, file_name,
+                  model_version, poster_score, status, source, excluded_from_upload, classified_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    "info_latin_korea",
+                    pid,
+                    sha,
+                    f"info_latin_korea/photos/{name}",
+                    name,
+                    "poster-clip-v1",
+                    0.1,
+                    "uncertain",
+                    "model",
+                    0,
+                ),
+            )
+        conn.commit()
+
+    handler = create_handler(settings, root)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    t = Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    sleep(0.05)
+    try:
+        conn_h = HTTPConnection("127.0.0.1", port, timeout=8)
+        conn_h.request("GET", "/api/items?status=uncertain&limit=20&offset=0")
+        first = json.loads(conn_h.getresponse().read().decode("utf-8"))
+        assert first["ok"] is True
+        assert first["summary"]["total"] == 21
+        assert first["summary"]["uncertain"] == 21
+        assert len(first["items"]) == 20
+        assert first["has_more"] is True
+        conn_h.request("GET", "/api/items?status=uncertain&limit=20&offset=20")
+        second = json.loads(conn_h.getresponse().read().decode("utf-8"))
+        assert len(second["items"]) == 1
+        assert second["has_more"] is False
+        assert second["summary"]["total"] == 21
+    finally:
+        server.shutdown()
+        close_fn = getattr(handler, "close_resources", None)
+        if callable(close_fn):
+            close_fn()
+
+
+def test_review_thumb_is_smaller_than_original(tmp_path: Path) -> None:
+    """목록 /thumb 는 긴 변 400px JPEG. 라이트박스 /photo 는 원본."""
+    from io import BytesIO
+
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    root = tmp_path / "raw"
+    photos = root / "info_latin_korea" / "photos"
+    photos.mkdir(parents=True)
+    image_path = photos / "big.jpg"
+    src = Image.new("RGB", (1200, 800), (12, 80, 40))
+    src.save(image_path, "JPEG", quality=95)
+    orig_size = image_path.stat().st_size
+    sha = "c" * 64
+    settings = _settings(tmp_path, root)
+    init_schema(settings.db_path)
+    with connect(settings.db_path) as conn:
+        ensure_poster_schema(conn)
+        pid = conn.execute(
+            "INSERT INTO photo_file (rel_path,file_name,name_parse_ok,sha256) VALUES (?,?,1,?)",
+            ("info_latin_korea/photos/big.jpg", "big.jpg", sha),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO poster_classify (
+              room_id, photo_id, sha256, rel_path, file_name,
+              model_version, poster_score, status, source, excluded_from_upload, classified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                "info_latin_korea",
+                pid,
+                sha,
+                "info_latin_korea/photos/big.jpg",
+                "big.jpg",
+                "poster-clip-v1",
+                0.2,
+                "uncertain",
+                "model",
+                0,
+            ),
+        )
+        conn.commit()
+
+    handler = create_handler(settings, root)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    t = Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    sleep(0.05)
+    try:
+        conn_h = HTTPConnection("127.0.0.1", port, timeout=8)
+        conn_h.request("GET", f"/thumb/{pid}")
+        thumb_res = conn_h.getresponse()
+        assert thumb_res.status == 200
+        assert "jpeg" in (thumb_res.getheader("Content-Type") or "").lower()
+        thumb_bytes = thumb_res.read()
+        assert len(thumb_bytes) < orig_size
+        with Image.open(BytesIO(thumb_bytes)) as im:
+            assert max(im.size) <= 400
+        conn_h.request("GET", f"/photo/{pid}")
+        photo_res = conn_h.getresponse()
+        photo_bytes = photo_res.read()
+        assert photo_res.status == 200
+        assert len(photo_bytes) == orig_size
+    finally:
+        server.shutdown()
+        close_fn = getattr(handler, "close_resources", None)
+        if callable(close_fn):
+            close_fn()

@@ -28,12 +28,15 @@ SCHEMA_SQL_UPLOAD_STATE = PROJECT_ROOT / "sql" / "008_upload_candidate_state.sql
 SCHEMA_SQL_CAPTION_IDX = PROJECT_ROOT / "sql" / "011_caption_query_indexes.sql"
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+def connect(db_path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """연결. timeout/WAL로 동시 읽기·쓰기 잠금 완화."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     log.info("sqlite connect db=%s", db_path.name)
     # [변경사유]: similar-review 멀티스레드 동시 요청 시 database is locked 완화
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    # [변경사유]: 리뷰 서버는 스레드마다 연결을 열지 않고 check_same_thread=False 로 1개를 재사용한다
+    conn = sqlite3.connect(
+        str(db_path), timeout=30.0, check_same_thread=check_same_thread
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
